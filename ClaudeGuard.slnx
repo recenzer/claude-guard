@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ClaudeGuard.Core/ClaudeGuard.Core.csproj" />
+    <Project Path="src/ClaudeGuard.Service/ClaudeGuard.Service.csproj" />
+    <Project Path="src/ClaudeGuard.Ui/ClaudeGuard.Ui.csproj" />
+  </Folder>
+</Solution>

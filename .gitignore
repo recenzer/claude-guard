@@ -1,0 +1,17 @@
+bin/
+obj/
+dist/
+release/
+.vs/
+*.user
+*.suo
+
+# local diagnostics (logs, screenshots, machine-specific scripts)
+diag/
+
+# secrets
+.env
+*.key
+*.pem
+credentials.json
+secrets/
