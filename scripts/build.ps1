@@ -28,7 +28,10 @@ if ($LASTEXITCODE -ne 0) { throw "Сборка службы завершилас
     -c Release -o (Join-Path $dist 'ui') --nologo
 if ($LASTEXITCODE -ne 0) { throw "Сборка UI завершилась с ошибкой ($LASTEXITCODE)" }
 
+& (Join-Path $PSScriptRoot 'singbox.ps1') -Destination (Join-Path $dist 'service')
+
 foreach ($f in @(
+    (Join-Path $dist 'service\sing-box.exe'),
     (Join-Path $dist 'service\ClaudeGuard.Service.exe'),
     (Join-Path $dist 'ui\ClaudeGuard.Ui.exe'))) {
     if (-not (Test-Path $f)) { throw "Не найден результат сборки: $f" }

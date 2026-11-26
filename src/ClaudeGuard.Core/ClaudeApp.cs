@@ -184,6 +184,28 @@ public static class ClaudeApp
         return result;
     }
 
+    /// <summary>True if a claude.exe from a Claude package runs outside the known install dir,
+    /// e.g. right after an MSIX update moved the app to a new versioned folder.</summary>
+    public static bool HasUnknownPackageProcess(string installDir)
+    {
+        var prefix = string.IsNullOrWhiteSpace(installDir) ? null : installDir.TrimEnd('\\') + "\\";
+        var found = false;
+        foreach (var p in Process.GetProcessesByName("claude"))
+        {
+            try
+            {
+                var path = p.MainModule?.FileName;
+                if (path != null
+                    && path.Contains(@"\WindowsApps\Claude_", StringComparison.OrdinalIgnoreCase)
+                    && (prefix == null || !path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                    found = true;
+            }
+            catch { }
+            finally { p.Dispose(); }
+        }
+        return found;
+    }
+
     public static int[] GetRunningPids(string installDir)
         => GetDesktopProcesses(installDir).Select(p => { var id = p.Id; p.Dispose(); return id; }).ToArray();
 

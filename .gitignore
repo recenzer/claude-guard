@@ -15,3 +15,4 @@ diag/
 *.pem
 credentials.json
 secrets/
+.cache/

@@ -7,7 +7,7 @@
       1. Проверяет Windows Firewall и наличие Claude Desktop.
       2. Делает резервную копию правил firewall и конфигурации.
       3. Копирует файлы в C:\Program Files\ClaudeGuard, выставляет ACL.
-      4. Запускает самопроверку (правила + туннель + физический блок).
+      4. Запускает самопроверку (физический блок, sing-box, прокси, TUN).
       5. Создаёт службу ClaudeGuard (LocalSystem, auto, recovery) и задачи:
          ClaudeGuardUi (при входе пользователя) и ClaudeGuardWatchdog (SYSTEM, каждую минуту).
       6. Запускает службу и проверяет IPC.
@@ -132,7 +132,7 @@ if (-not $NoBuild -and (Test-Path (Join-Path $root "src"))) {
     }
 }
 
-foreach ($f in @($srcService, $srcUi)) {
+foreach ($f in @($srcService, $srcUi, (Join-Path $srcService 'sing-box.exe'))) {
     if (-not (Test-Path $f)) {
         throw "Не найден каталог сборки: $f. Запустите scripts\build.ps1 (нужен .NET SDK 10)."
     }
@@ -183,13 +183,19 @@ Write-Step "Настройка ACL"
 & icacls.exe $DataDir /inheritance:r `
     /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "icacls завершился с ошибкой." }
-Write-Ok "ACL: SYSTEM/Administrators — запись, Users — чтение"
+# Profile and generated sing-box config contain proxy credentials: SYSTEM/Administrators only.
+$secretsDir = Join-Path $DataDir 'secrets'
+New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
+& icacls.exe $secretsDir /inheritance:r `
+    /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "icacls (secrets) завершился с ошибкой." }
+Write-Ok "ACL: SYSTEM/Administrators — запись, Users — чтение; secrets — только SYSTEM/Administrators"
 
 # ---------------------------------------------------------------- самопроверка
 
 $selftestOk = $false
 if (-not $SkipSelfTest) {
-    Write-Step "Самопроверка (правила firewall + туннель + физический блок)"
+    Write-Step "Самопроверка (физический блок + sing-box + прокси + TUN)"
     $out = (& $svcExe --selftest 2>&1 | Out-String)
     $selftestFile = Join-Path $DataDir 'install-selftest.json'
     Set-Content -Path $selftestFile -Value $out -Encoding UTF8
@@ -202,9 +208,10 @@ if (-not $SkipSelfTest) {
         $selftestOk = $true
         Write-Ok "Самопроверка пройдена"
         foreach ($s in $json.Steps) { Write-Host "      $s" -ForegroundColor DarkGray }
-    } elseif ($json -and ($json.Error -match 'TUN не активен')) {
-        Write-Warn2 "VPN (happ-tun) не запущен — проверка физического блока пропущена."
-        Write-Warn2 "Правила созданы; до восстановления VPN Claude будет заблокирован (fail-closed)."
+    } elseif ($json -and ($json.Error -match 'нет профиля прокси')) {
+        Write-Warn2 "Профиль прокси ещё не задан — физический блок проверен, проверка прокси пропущена."
+        Write-Warn2 "Claude будет заблокирован, пока вы не импортируете профиль в окне Claude Guard."
+        foreach ($s in $json.Steps) { Write-Host "      $s" -ForegroundColor DarkGray }
         $selftestOk = $true
     } else {
         $err = if ($json) { $json.Error } else { 'не удалось разобрать результат' }
@@ -222,7 +229,7 @@ try {
     $binPath = '"' + $svcExe + '" --service'
     New-Service -Name $ServiceName -BinaryPathName $binPath `
         -DisplayName $ServiceDisplay `
-        -Description 'Защита Claude Desktop от утечки трафика при сбое VPN (fail-closed firewall).' `
+        -Description 'Claude Desktop только через свой прокси (sing-box TUN + fail-closed firewall).' `
         -StartupType Automatic | Out-Null
     & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
     & sc.exe failureflag $ServiceName 1 | Out-Null

@@ -101,7 +101,7 @@ public static class NetInfo
         try
         {
             var parts = cidr.Split('/');
-            if (parts.Length != 2) return true;
+            if (parts.Length != 2) return false;
             var net = IPAddress.Parse(parts[0]).MapToIPv4().GetAddressBytes();
             int prefix = int.Parse(parts[1]);
             var a = ip.MapToIPv4().GetAddressBytes();
@@ -114,7 +114,7 @@ public static class NetInfo
             }
             return true;
         }
-        catch { return true; }
+        catch { return false; } // invalid CIDR must not silently disable the check
     }
 
     public static bool IsProcessRunning(string name)

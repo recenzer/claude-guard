@@ -32,7 +32,12 @@ public sealed class GuardStatus
     public string TunAlias { get; set; } = "";
     public string TunIp { get; set; } = "";
     public string PhysicalIp { get; set; } = "";
-    public string[] Processes { get; set; } = Array.Empty<string>();
+
+    public bool HasProfile { get; set; }
+    /// <summary>Profile summary without secrets: name, protocol, server:port.</summary>
+    public string ProfileSummary { get; set; } = "";
+    public bool SingBoxRunning { get; set; }
+    public int SingBoxPid { get; set; }
 
     public DateTimeOffset Updated { get; set; } = DateTimeOffset.Now;
     public string Version { get; set; } = "";
@@ -45,7 +50,10 @@ public static class ReasonCodes
 {
     public const string Startup = "STARTUP";
     public const string VpnConnected = "VPN_CONNECTED";
-    public const string VpnProcessMissing = "VPN_PROCESS_MISSING";
+    public const string NoProfile = "NO_PROFILE";
+    public const string SingBoxMissing = "SINGBOX_MISSING";
+    public const string SingBoxDown = "SINGBOX_DOWN";
+    public const string SingBoxConfigError = "SINGBOX_CONFIG_ERROR";
     public const string TunMissing = "TUN_INTERFACE_MISSING";
     public const string TunDown = "TUN_INTERFACE_DOWN";
     public const string TunNoIp = "TUN_NO_IPV4";

@@ -22,6 +22,13 @@ internal static class Program
             Environment.Exit(Elevated("resume"));
             return;
         }
+        // elevated helper: apply a profile from a temp file written by the non-elevated UI
+        var spIdx = Array.FindIndex(args, a => a.Equals("--set-profile", StringComparison.OrdinalIgnoreCase));
+        if (spIdx >= 0)
+        {
+            Environment.Exit(SetProfileFromFile(spIdx + 1 < args.Length ? args[spIdx + 1] : null));
+            return;
+        }
 
         using var mutex = new Mutex(true, MutexName, out bool created);
         if (!created)
@@ -47,6 +54,25 @@ internal static class Program
 
         Application.Run(form);
         GC.KeepAlive(mutex);
+    }
+
+    private static int SetProfileFromFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return 3;
+        var resultFile = path + ".result";
+        try
+        {
+            var text = File.ReadAllText(path);
+            try { File.Delete(path); } catch { }
+            var r = Ipc.Call(new GuardRequest { Cmd = "set-profile", Payload = text }, 60000);
+            File.WriteAllText(resultFile, r.Ok ? "OK " + r.Profile?.Summary : (r.Error ?? "ошибка"));
+            return r.Ok ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            try { File.WriteAllText(resultFile, ex.Message); } catch { }
+            return 2;
+        }
     }
 
     private static int Elevated(string cmd)

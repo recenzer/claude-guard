@@ -78,8 +78,11 @@ public static class Log
     {
         var today = DateTime.Now.Date;
         if (_file != null && _fileDate == today) return;
+        var dayChanged = _file != null;
         _fileDate = today;
         _file = Path.Combine(_dir, $"guard-{today:yyyyMMdd}.log");
+        // the service runs for weeks: clean up on every day change, not only at startup
+        if (dayChanged) CleanupOldFiles();
     }
 
     private static void CleanupOldFiles()

@@ -13,6 +13,8 @@ public sealed class GuardRequest
 {
     public string Cmd { get; set; } = "";
     public int Count { get; set; } = 200;
+    /// <summary>Command argument, e.g. a profile link/JSON for "set-profile".</summary>
+    public string Payload { get; set; } = "";
 }
 
 public sealed class GuardResponse
@@ -22,6 +24,7 @@ public sealed class GuardResponse
     public GuardStatus Status { get; set; }
     public LogEvent[] Log { get; set; }
     public SelfTestResult SelfTest { get; set; }
+    public ProfileResult Profile { get; set; }
     public string Version { get; set; } = ProgramInfo.Version;
 }
 

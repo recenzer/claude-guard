@@ -89,6 +89,16 @@ public sealed class Firewall : IDisposable
         return list;
     }
 
+    /// <summary>Compares interface type lists ignoring order and case ("" and "All" mean all interfaces).</summary>
+    public static bool SameInterfaceTypes(string a, string b)
+    {
+        static string[] Norm(string s) => string.IsNullOrWhiteSpace(s)
+            ? new[] { "all" }
+            : s.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(x => x.ToLowerInvariant()).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        return Norm(a).SequenceEqual(Norm(b));
+    }
+
     public static string MakeName(string kind, string program)
     {
         var hash = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(program.ToLowerInvariant())))[..8];
@@ -127,8 +137,22 @@ public sealed class Firewall : IDisposable
         {
             try
             {
-                var existing = GetOurRules().ToDictionary(x => x.Name, StringComparer.Ordinal);
+                var all = GetOurRules();
                 var desiredNames = new HashSet<string>(desired.Select(d => d.Name), StringComparer.Ordinal);
+
+                // Windows allows several rules with one name (e.g. after `netsh advfirewall import`).
+                // Remove every copy of a duplicated name and recreate it below; otherwise
+                // ToDictionary would throw and the rules could never be applied again.
+                foreach (var g in all.GroupBy(x => x.Name, StringComparer.Ordinal).Where(g => g.Count() > 1))
+                {
+                    for (int i = 0; i < g.Count(); i++)
+                    {
+                        try { _rules.Remove(g.Key); } catch { }
+                    }
+                }
+                var existing = GetOurRules()
+                    .GroupBy(x => x.Name, StringComparer.Ordinal)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
                 foreach (var old in existing.Values)
                 {
@@ -142,10 +166,8 @@ public sealed class Firewall : IDisposable
                 {
                     if (existing.TryGetValue(d.Name, out var cur))
                     {
-                        var ifTypes = string.IsNullOrEmpty(d.InterfaceTypes) ? "All" : d.InterfaceTypes;
-                        var curIf = string.IsNullOrEmpty(cur.InterfaceTypes) ? "All" : cur.InterfaceTypes;
                         bool same = string.Equals(cur.Program, d.Program, StringComparison.OrdinalIgnoreCase)
-                                    && string.Equals(curIf, ifTypes, StringComparison.OrdinalIgnoreCase)
+                                    && SameInterfaceTypes(cur.InterfaceTypes, d.InterfaceTypes)
                                     && cur.Action == ActionBlock;
                         if (!same)
                         {
