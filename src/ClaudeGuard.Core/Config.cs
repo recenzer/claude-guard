@@ -31,6 +31,10 @@ public sealed class Config
         "anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com"
     };
 
+    /// <summary>Keep Claude domains in the system proxy bypass list, so another VPN client in
+    /// "system proxy" mode (e.g. Happ) does not pull Claude traffic away from our TUN.</summary>
+    public bool ManageSystemProxyBypass { get; set; } = true;
+
     // ---- Claude Desktop ----
     public string ClaudePackageFamilyName { get; set; } = "Claude_pzs8sxrjxfjjc";
     public string ClaudeAppUserModelId { get; set; } = "Claude_pzs8sxrjxfjjc!Claude";

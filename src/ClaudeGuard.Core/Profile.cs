@@ -108,6 +108,8 @@ public static class ProfileParser
             "vmess" => ParseVmess(link),
             "ss" => ParseShadowsocks(link),
             "hysteria2" or "hy2" => ParseHysteria2(link),
+            "socks5" or "socks" or "socks5h" => ParsePlainProxy(link, "socks"),
+            "http" or "https" => ParsePlainProxy(link, "http"),
             _ => throw new FormatException($"Протокол «{scheme}» не поддерживается")
         };
     }
@@ -286,6 +288,39 @@ public static class ProfileParser
             ["password"] = userInfo[(colon + 1)..]
         };
         return Make(ob, name, "shadowsocks", parts.Host, parts.Port);
+    }
+
+    /// <summary>socks5://[user:pass@]host:port, http(s)://[user:pass@]host:port.</summary>
+    private static ProxyProfile ParsePlainProxy(string link, string type)
+    {
+        var scheme = link[..link.IndexOf("://", StringComparison.Ordinal)].ToLowerInvariant();
+        var rest = link[(scheme.Length + 3)..];
+        var authority = rest.Split('/', '?', '#')[0];
+        var hostPart = authority[(authority.LastIndexOf('@') + 1)..];
+        var hasPath = rest.Length > authority.Length && rest[authority.Length] == '/' && rest[authority.Length..].Trim('/').Length > 0;
+        var hasPort = hostPart.StartsWith('[') ? hostPart.Contains("]:") : hostPart.Contains(':');
+        if (type == "http" && (hasPath || !hasPort))
+            throw new FormatException("Похоже на ссылку подписки или сайта, а не на прокси. " +
+                                      "Откройте подписку и скопируйте из неё ссылку vless:// / trojan:// и т. п.");
+
+        var p = SplitLink(link);
+        var ob = new JsonObject
+        {
+            ["type"] = type,
+            ["tag"] = "proxy",
+            ["server"] = p.Host,
+            ["server_port"] = p.Port
+        };
+        if (type == "socks") ob["version"] = "5";
+        if (!string.IsNullOrEmpty(p.UserInfo))
+        {
+            var colon = p.UserInfo.IndexOf(':');
+            ob["username"] = colon >= 0 ? p.UserInfo[..colon] : p.UserInfo;
+            if (colon >= 0) ob["password"] = p.UserInfo[(colon + 1)..];
+        }
+        if (scheme == "https")
+            ob["tls"] = new JsonObject { ["enabled"] = true, ["server_name"] = p.Query["sni"] ?? p.Host };
+        return Make(ob, p.Name, scheme == "https" ? "https" : type == "socks" ? "socks5" : "http", p.Host, p.Port);
     }
 
     private static ProxyProfile ParseHysteria2(string link)

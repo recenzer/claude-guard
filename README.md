@@ -17,12 +17,18 @@ Claude Desktop ходит в интернет **только через ваш �
 - Windows 10 / 11, x64
 - Включённый Windows Firewall
 - Claude Desktop (пакет MSIX)
-- Ссылка или конфиг прокси: VLESS (TLS / REALITY, tcp / ws / grpc / httpupgrade / h2), VMess, Trojan, Shadowsocks, Hysteria2
+- Ссылка или конфиг прокси: VLESS (TLS / REALITY, tcp / ws / grpc / httpupgrade / h2), VMess, Trojan, Shadowsocks, Hysteria2, SOCKS5, HTTP(S)
 - Права администратора для установки и смены профиля
 
 .NET и sing-box устанавливать не нужно: всё в архиве.
 
-**Не запускайте одновременно другой VPN с TUN-режимом** (Happ, v2rayN в режиме TUN и т. п.): два TUN с автомаршрутизацией конфликтуют.
+## Вместе с Happ / другим VPN
+
+Можно: Claude идёт через Claude Guard, остальные программы — через ваш VPN. Гайд есть и в самом приложении («Гайд: вместе с Happ / другим VPN»).
+
+1. В Happ включите режим **«Системный прокси»**, **TUN-режим выключите**. Два TUN мешают друг другу — Claude Guard заблокирует Claude с причиной `ROUTE_NOT_VIA_TUN`.
+2. PAC-режим тоже выключите.
+3. Claude Guard сам добавляет домены Claude в исключения системного прокси и возвращает их, если VPN-клиент их сотрёт (`manageSystemProxyBypass`). Иначе Claude ушёл бы в прокси Happ, а не в Claude Guard.
 
 ## Установка
 
@@ -44,7 +50,9 @@ Windows SmartScreen или антивирус могут предупредит�
 
 ## Что можно импортировать
 
-- Ссылки: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://` (`hy2://`), а также подписку в base64 (берётся первая ссылка).
+- Ссылки: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://` (`hy2://`), `socks5://[user:pass@]host:port`, `http(s)://[user:pass@]host:port`, а также подписку в base64 (берётся первая ссылка).
+
+  SOCKS5 и HTTP не шифруют соединение с прокси: провайдер видит, к какому сайту вы подключаетесь. Если Claude у провайдера заблокирован, нужен VLESS/Trojan и т. п.
 - Конфиг **Xray** (JSON): берётся первый outbound `vless` / `vmess` / `trojan` / `shadowsocks`.
 - Конфиг **sing-box** или один его outbound.
 
@@ -74,6 +82,7 @@ Windows SmartScreen или антивирус могут предупредит�
 | `tunInterfaceName` | `ClaudeGuard` | имя TUN-адаптера sing-box |
 | `tunAddress` | `172.19.0.1/30` | адрес TUN; смените, если подсеть занята |
 | `tunStack` | `gvisor` | стек TUN: `gvisor`, `system`, `mixed` |
+| `manageSystemProxyBypass` | `true` | держать домены Claude в исключениях системного прокси |
 | `extraProxyProcessRegex` | `[]` | дополнительные процессы в прокси (RE2 по полному пути), например отдельный Claude Code CLI |
 | `remoteDnsServer` | `1.1.1.1` | DoH-сервер для доменов Claude (через прокси) |
 | `remoteDnsDomains` | anthropic.com, claude.ai, … | домены, чей DNS идёт через прокси |

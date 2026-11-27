@@ -384,6 +384,19 @@ public sealed class MainForm : Form
             AutoSize = true,
             Location = new Point(2, 34)
         };
+        var guide = new LinkLabel
+        {
+            Text = "Гайд: вместе с Happ / другим VPN",
+            Font = Theme.Small,
+            LinkColor = Theme.Blue,
+            ActiveLinkColor = Theme.Blue,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        guide.LinkClicked += (_, _) => { using var g = new GuideDialog(SystemProxy.Inspect(_cfg, fix: false)); g.ShowDialog(this); };
+        header.Resize += (_, _) => guide.Location = new Point(header.Width - guide.Width - 2, 36);
+        header.Controls.Add(guide);
         header.Controls.Add(_serviceInfo);
         header.Controls.Add(title);
         header.Controls.Add(subtitle);
@@ -608,6 +621,7 @@ public sealed class MainForm : Form
         menu.Items.Add("Проверить сейчас", null, async (_, _) => await CallAsync("check", 3000));
         menu.Items.Add("Запустить Claude", null, (_, _) => ClaudeApp.Launch(_cfg));
         menu.Items.Add("Импорт профиля…", null, async (_, _) => { RestoreWindow(); await ImportProfileAsync(); });
+        menu.Items.Add("Гайд: вместе с Happ", null, (_, _) => { RestoreWindow(); using var g = new GuideDialog(SystemProxy.Inspect(_cfg, fix: false)); g.ShowDialog(this); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Выход из интерфейса", null, (_, _) =>
         {
@@ -673,6 +687,38 @@ public sealed class MainForm : Form
         catch { return null; }
     }
 
+    /// <summary>Every 5 s: keep Claude domains in the system proxy bypass list
+    /// (a VPN client in "system proxy" mode may overwrite it on every connect).</summary>
+    private void CheckSystemProxy()
+    {
+        if (!_cfg.ManageSystemProxyBypass) return;
+        if ((DateTimeOffset.Now - _lastProxyCheck).TotalSeconds < 5) return;
+        _lastProxyCheck = DateTimeOffset.Now;
+        if (_status?.Protection == ProtectionState.Disabled) return;
+
+        var st = SystemProxy.Inspect(_cfg, fix: true);
+        if (st.Fixed && !_proxyFixShown)
+        {
+            _proxyFixShown = true;
+            _tray.ShowBalloonTip(4000, "Claude Guard",
+                "Включён системный прокси другого VPN — домены Claude добавлены в исключения, Claude идёт через Claude Guard.",
+                ToolTipIcon.Info);
+        }
+        var pac = !string.IsNullOrWhiteSpace(st.AutoConfigUrl);
+        if (pac && !_pacWarnShown)
+        {
+            _pacWarnShown = true;
+            _tray.ShowBalloonTip(6000, "Claude Guard",
+                "Включён PAC-скрипт прокси — исключения для Claude в нём не настроить. Откройте «Гайд» в окне Claude Guard.",
+                ToolTipIcon.Warning);
+        }
+        if (!pac) _pacWarnShown = false;
+    }
+
+    private DateTimeOffset _lastProxyCheck = DateTimeOffset.MinValue;
+    private bool _proxyFixShown;
+    private bool _pacWarnShown;
+
     private async Task RefreshStatusAsync()
     {
         if (_busy) return;
@@ -689,6 +735,7 @@ public sealed class MainForm : Form
 
             _status = resp.Status;
             ApplyStatus(_status);
+            CheckSystemProxy();
 
             if (_status.RestartPending && !_restartHandled)
             {
@@ -1135,5 +1182,109 @@ internal sealed class ProfileDialog : Form
         };
         b.FlatAppearance.BorderColor = Theme.Border;
         return b;
+    }
+}
+
+// ======================================================================
+//  Мини-гайд: Claude Guard вместе с Happ / другим VPN
+// ======================================================================
+
+internal sealed class GuideDialog : Form
+{
+    public GuideDialog(SystemProxyState proxy)
+    {
+        Text = "Гайд: Claude Guard вместе с другим VPN";
+        ClientSize = new Size(640, 560);
+        MinimumSize = new Size(520, 420);
+        StartPosition = FormStartPosition.CenterParent;
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Font = Theme.Body;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        MaximizeBox = false;
+
+        string current;
+        if (!proxy.Enabled && string.IsNullOrWhiteSpace(proxy.AutoConfigUrl))
+            current = "Сейчас: системный прокси выключен — конфликтов нет.";
+        else if (!string.IsNullOrWhiteSpace(proxy.AutoConfigUrl))
+            current = "Сейчас: ВКЛЮЧЁН PAC-скрипт (" + proxy.AutoConfigUrl + ") — выключите его в VPN-клиенте (см. шаг 2).";
+        else
+            current = "Сейчас: системный прокси включён (" + proxy.Server + "), исключения для Claude " +
+                      (proxy.BypassOk ? "на месте ✓" : "будут добавлены автоматически через несколько секунд");
+
+        var text =
+            "Claude Guard ведёт через свой прокси только Claude Desktop. Другой VPN (Happ, v2rayN, Hiddify, Clash) " +
+            "может работать одновременно для остальных программ — но только в правильном режиме.\r\n\r\n" +
+            "1. Режим Happ: «Системный прокси» (Proxy / System proxy).\r\n" +
+            "   TUN-режим (VPN-режим, «весь трафик») ВЫКЛЮЧИТЬ. Два TUN с автомаршрутизацией мешают друг другу: " +
+            "Claude Guard увидит, что маршрут ушёл в чужой адаптер, и заблокирует Claude " +
+            "(причина ROUTE_NOT_VIA_TUN).\r\n\r\n" +
+            "2. PAC-режим («автоматическая настройка прокси») тоже выключить — используйте обычный системный прокси.\r\n\r\n" +
+            "3. Исключения. Claude Guard сам добавляет домены Claude в исключения системного прокси " +
+            "(anthropic.com, claude.ai, claude.com, claudeusercontent.com) и возвращает их, если Happ их сотрёт. " +
+            "Благодаря этому Claude не уходит в прокси Happ, а идёт через Claude Guard.\r\n\r\n" +
+            "4. Если в Happ есть свой список «прямых» доменов (Direct / Bypass) — добавьте туда эти же домены. " +
+            "Не обязательно, но надёжнее.\r\n\r\n" +
+            "5. Проверка: значок Claude Guard зелёный, Claude работает. Браузер при этом ходит через Happ, как раньше.\r\n\r\n" +
+            "Если Claude Guard заблокировал Claude после включения Happ — откройте окно и посмотрите «Причину». " +
+            "Почти всегда это включённый TUN-режим в Happ.\r\n\r\n" +
+            "Без другого VPN ничего настраивать не нужно.";
+
+        var status = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 52,
+            Padding = new Padding(14, 12, 14, 0),
+            Font = Theme.Semi,
+            ForeColor = proxy.Enabled && !proxy.BypassOk || !string.IsNullOrWhiteSpace(proxy.AutoConfigUrl) ? Theme.Amber : Theme.Green,
+            Text = current
+        };
+        var body = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Card,
+            ForeColor = Theme.Text,
+            BorderStyle = BorderStyle.None,
+            Font = Theme.Body,
+            Text = text,
+            TabStop = false
+        };
+        var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 6, 14, 6), BackColor = Theme.Bg };
+        host.Controls.Add(body);
+
+        var close = new Button
+        {
+            Text = "Понятно",
+            Width = 130,
+            Height = 34,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Green,
+            ForeColor = Theme.Bg,
+            Font = Theme.Semi,
+            UseVisualStyleBackColor = false,
+            DialogResult = DialogResult.OK
+        };
+        close.FlatAppearance.BorderColor = Theme.Border;
+        var bar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 52,
+            FlowDirection = FlowDirection.RightToLeft,
+            Padding = new Padding(10, 8, 10, 8),
+            BackColor = Theme.Bg
+        };
+        bar.Controls.Add(close);
+
+        Controls.Add(host);
+        Controls.Add(bar);
+        Controls.Add(status);
+        AcceptButton = close;
+        CancelButton = close;
+        Shown += (_, _) => body.Select(0, 0);
     }
 }
