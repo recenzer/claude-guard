@@ -163,6 +163,40 @@ public sealed class SingBoxRunner : IDisposable
         get { lock (_sync) { try { return IsRunning ? _proc.Id : 0; } catch { return 0; } } }
     }
 
+    private string _lastProxyError = "";
+    private long _lastProxyErrorTicks;
+
+    /// <summary>Human-readable reason of the latest outbound failure (fresh for 15 s), or "".</summary>
+    public string RecentProxyError
+    {
+        get
+        {
+            if (Environment.TickCount64 - Interlocked.Read(ref _lastProxyErrorTicks) > 15000) return "";
+            return Volatile.Read(ref _lastProxyError) ?? "";
+        }
+    }
+
+    /// <summary>Maps typical sing-box outbound errors to a short explanation for the UI.</summary>
+    private static string Explain(string line)
+    {
+        if (!line.Contains("outbound/") && !line.Contains("[proxy]") && !line.Contains("dns: exchange failed")) return null;
+        if (line.Contains("direct[direct]")) return null; // other apps going direct are not our concern
+        var l = line.ToLowerInvariant();
+        if (l.Contains("incorrect user name or password") || l.Contains("authentication failed") || l.Contains("407"))
+            return "прокси отклонил логин или пароль — проверьте ссылку";
+        if (l.Contains("connection refused") || l.Contains("actively refused"))
+            return "сервер прокси отклонил подключение (порт закрыт?)";
+        if (l.Contains("i/o timeout") || l.Contains("timed out"))
+            return "сервер прокси не отвечает";
+        if (l.Contains("no such host") || l.Contains("lookup "))
+            return "не удалось найти адрес сервера прокси";
+        if (l.Contains("reality") || l.Contains("tls: ") || l.Contains("x509") || l.Contains("certificate"))
+            return "ошибка TLS/REALITY — проверьте sni, pbk, sid в ссылке";
+        if (l.Contains("eof") || l.Contains("forcibly closed") || l.Contains("reset by peer"))
+            return "сервер прокси оборвал соединение (неверный UUID/пароль или протокол?)";
+        return null;
+    }
+
     public string LastOutput
     {
         get { lock (_lastLines) return string.Join(" | ", _lastLines); }
@@ -304,6 +338,14 @@ public sealed class SingBoxRunner : IDisposable
         {
             _lastLines.Enqueue(line.Length > 300 ? line[..300] : line);
             while (_lastLines.Count > 5) _lastLines.Dequeue();
+        }
+
+        // before the log budget: the UI reason must stay fresh even when logging is throttled
+        var explained = Explain(line);
+        if (explained != null)
+        {
+            Volatile.Write(ref _lastProxyError, explained);
+            Interlocked.Exchange(ref _lastProxyErrorTicks, Environment.TickCount64);
         }
 
         // sing-box can be chatty on a broken network: at most 30 lines per minute in our log

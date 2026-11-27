@@ -395,7 +395,10 @@ public sealed class GuardEngine : IDisposable
                 else if (!pr.Ok)
                 {
                     failCode = string.IsNullOrEmpty(pr.Code) ? ReasonCodes.ProbeTimeout : pr.Code;
-                    failText = $"Проверка через прокси не прошла: {pr.Msg}";
+                    var why = _singBox.RecentProxyError;
+                    failText = string.IsNullOrEmpty(why)
+                        ? $"Проверка через прокси не прошла: {pr.Msg}"
+                        : $"Проверка через прокси не прошла: {why}";
                 }
                 if (newProbeResult) _lastCountedProbeTicks = pr.Ticks;
             }

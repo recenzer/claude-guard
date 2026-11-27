@@ -34,6 +34,12 @@ internal static class Theme
     public static readonly Font Semi = new("Segoe UI Semibold", 9.5f);
     public static readonly Font Mono = new("Consolas", 9f);
 
+    /// <summary>DPI scale (DeviceDpi / 96). All pixel sizes go through S(): WinForms does not scale
+    /// TableLayoutPanel absolute row/column styles, which made text overlap at 125–150%.</summary>
+    public static float Scale = 1f;
+    public static int S(int v) => (int)Math.Round(v * Scale);
+    public static Padding P(int l, int t, int r, int b) => new(S(l), S(t), S(r), S(b));
+
     public static GraphicsPath Round(RectangleF r, float radius)
     {
         float d = radius * 2;
@@ -84,14 +90,14 @@ internal class Card : Panel
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
-        using var path = Theme.Round(r, Radius);
+        using var path = Theme.Round(r, Theme.S(Radius));
         using (var fill = new SolidBrush(_fill)) g.FillPath(fill, path);
 
         if (!_accent.IsEmpty)
         {
             var state = g.Save();
             g.SetClip(path, CombineMode.Intersect);
-            using (var b = new SolidBrush(_accent)) g.FillRectangle(b, 0, 0, 4, Height);
+            using (var b = new SolidBrush(_accent)) g.FillRectangle(b, 0, 0, Theme.S(4), Height);
             g.Restore(state);
         }
 
@@ -124,11 +130,11 @@ internal sealed class HeroCard : Card
 
     protected override void PaintExtra(Graphics g)
     {
-        const int d = 52;
-        int x = 24, y = (Height - d) / 2;
+        int d = Theme.S(52), h = Theme.S(8);
+        int x = Theme.S(24), y = (Height - d) / 2;
 
         using (var halo = new SolidBrush(Color.FromArgb(38, _statusColor)))
-            g.FillEllipse(halo, x - 8, y - 8, d + 16, d + 16);
+            g.FillEllipse(halo, x - h, y - h, d + 2 * h, d + 2 * h);
         using (var body = new SolidBrush(_statusColor))
             g.FillEllipse(body, x, y, d, d);
 
@@ -150,7 +156,7 @@ internal sealed class Tile : Card
 
     public Tile(string caption)
     {
-        Padding = new Padding(16, 12, 14, 10);
+        Padding = Theme.P(16, 10, 12, 8);
 
         var grid = new TableLayoutPanel
         {
@@ -161,8 +167,8 @@ internal sealed class Tile : Card
             Margin = Padding.Empty
         };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.S(22)));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.S(30)));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         Caption.Text = caption;
@@ -170,7 +176,9 @@ internal sealed class Tile : Card
         Caption.ForeColor = Theme.Muted;
         Caption.Font = Theme.Small;
         Caption.BackColor = Color.Transparent;
-        Caption.Padding = new Padding(16, 0, 0, 0);
+        Caption.Padding = new Padding(Theme.S(16), 0, 0, 0);
+        Caption.AutoEllipsis = true;
+        Caption.Margin = ValueLabel.Margin = Detail.Margin = Padding.Empty;
         Caption.TextAlign = ContentAlignment.MiddleLeft;
 
         ValueLabel.Dock = DockStyle.Fill;
@@ -204,7 +212,7 @@ internal sealed class Tile : Card
     protected override void PaintExtra(Graphics g)
     {
         using var b = new SolidBrush(_dot);
-        g.FillEllipse(b, 16, Padding.Top + 7, 9, 9);
+        g.FillEllipse(b, Theme.S(16), Padding.Top + Theme.S(7), Theme.S(9), Theme.S(9));
     }
 }
 
@@ -262,13 +270,15 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "Claude Guard";
-        ClientSize = new Size(720, 680);
-        MinimumSize = new Size(660, 600);
+        // sizes are scaled explicitly (Theme.S); fonts are in points and scale by themselves
+        AutoScaleMode = AutoScaleMode.None;
+        Theme.Scale = DeviceDpi / 96f;
+        ClientSize = new Size(Theme.S(740), Theme.S(720));
+        MinimumSize = new Size(Theme.S(680), Theme.S(640));
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
         Font = Theme.Body;
         StartPosition = FormStartPosition.CenterScreen;
-        AutoScaleMode = AutoScaleMode.Dpi;
         Icon = IconFor(Theme.Green);
 
         _startHidden = Environment.GetCommandLineArgs()
@@ -353,37 +363,54 @@ public sealed class MainForm : Form
             ColumnCount = 1,
             RowCount = 7,
             BackColor = Theme.Bg,
-            Padding = new Padding(20, 16, 20, 16)
+            Padding = Theme.P(20, 14, 20, 16)
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 6; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        // header, hero, tiles, reason, profile, buttons — fixed (scaled); log takes the rest
+        foreach (var h in new[] { 62, 116, 108, 86, 60, 52 })
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, Theme.S(h)));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
-        // --- шапка ---
-        var header = new Panel { Dock = DockStyle.Fill, Height = 56, BackColor = Theme.Bg, Margin = new Padding(0, 0, 0, 8) };
-        _serviceInfo.Dock = DockStyle.Right;
-        _serviceInfo.AutoSize = true;
-        _serviceInfo.ForeColor = Theme.Muted;
-        _serviceInfo.Font = Theme.Small;
-        _serviceInfo.TextAlign = ContentAlignment.MiddleRight;
-        _serviceInfo.Text = "служба: …";
+        // --- шапка: [заголовок | служба] / [подзаголовок | гайд] ---
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            BackColor = Theme.Bg,
+            Margin = Theme.P(0, 0, 0, 6)
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 60));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
         var title = new Label
         {
             Text = "Claude Guard",
             Font = Theme.Title,
             ForeColor = Theme.Text,
-            AutoSize = true,
-            Location = new Point(0, 2)
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true,
+            Margin = Padding.Empty
         };
         var subtitle = new Label
         {
             Text = "Claude Desktop ходит в сеть только через свой прокси (sing-box)",
             Font = Theme.Small,
             ForeColor = Theme.Muted,
-            AutoSize = true,
-            Location = new Point(2, 34)
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft,
+            AutoEllipsis = true,
+            Margin = Padding.Empty
         };
+        _serviceInfo.AutoSize = true;
+        _serviceInfo.Anchor = AnchorStyles.Right;
+        _serviceInfo.ForeColor = Theme.Muted;
+        _serviceInfo.Font = Theme.Small;
+        _serviceInfo.Margin = Theme.P(12, 0, 0, 0);
+        _serviceInfo.Text = "служба: …";
         var guide = new LinkLabel
         {
             Text = "Гайд: вместе с Happ / другим VPN",
@@ -391,24 +418,24 @@ public sealed class MainForm : Form
             LinkColor = Theme.Blue,
             ActiveLinkColor = Theme.Blue,
             AutoSize = true,
-            BackColor = Color.Transparent,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Margin = Theme.P(12, 0, 0, 0)
         };
         guide.LinkClicked += (_, _) => { using var g = new GuideDialog(SystemProxy.Inspect(_cfg, fix: false)); g.ShowDialog(this); };
-        header.Resize += (_, _) => guide.Location = new Point(header.Width - guide.Width - 2, 36);
-        header.Controls.Add(guide);
-        header.Controls.Add(_serviceInfo);
-        header.Controls.Add(title);
-        header.Controls.Add(subtitle);
+        header.Controls.Add(title, 0, 0);
+        header.Controls.Add(_serviceInfo, 1, 0);
+        header.Controls.Add(subtitle, 0, 1);
+        header.Controls.Add(guide, 1, 1);
         root.Controls.Add(header, 0, 0);
 
         // --- главная карточка ---
         _hero.Dock = DockStyle.Fill;
-        _hero.Height = 112;
-        _hero.Margin = new Padding(0, 0, 0, 10);
-        _hero.Padding = new Padding(100, 20, 20, 14);
+        _hero.Margin = Theme.P(0, 0, 0, 10);
+        _hero.Padding = Theme.P(100, 16, 20, 12);
         _heroTitle.Dock = DockStyle.Top;
-        _heroTitle.Height = 36;
+        _heroTitle.Height = Theme.S(40);
+        _heroTitle.AutoEllipsis = true;
+        _heroTitle.TextAlign = ContentAlignment.MiddleLeft;
         _heroTitle.Font = Theme.Hero;
         _heroTitle.ForeColor = Theme.Muted;
         _heroTitle.BackColor = Color.Transparent;
@@ -418,6 +445,7 @@ public sealed class MainForm : Form
         _heroSub.ForeColor = Theme.Muted;
         _heroSub.BackColor = Color.Transparent;
         _heroSub.Text = "Связь со службой…";
+        _heroSub.AutoEllipsis = true;
         _hero.Controls.Add(_heroSub);
         _hero.Controls.Add(_heroTitle);
         root.Controls.Add(_hero, 0, 1);
@@ -426,18 +454,17 @@ public sealed class MainForm : Form
         var tiles = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Height = 100,
             ColumnCount = 3,
             RowCount = 1,
             BackColor = Theme.Bg,
-            Margin = new Padding(0, 0, 0, 10)
+            Margin = Theme.P(0, 0, 0, 10)
         };
         for (int i = 0; i < 3; i++) tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
         tiles.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         _vpnTile.Dock = _protTile.Dock = _netTile.Dock = DockStyle.Fill;
-        _vpnTile.Margin = new Padding(0, 0, 5, 0);
-        _protTile.Margin = new Padding(5, 0, 5, 0);
-        _netTile.Margin = new Padding(5, 0, 0, 0);
+        _vpnTile.Margin = Theme.P(0, 0, 5, 0);
+        _protTile.Margin = Theme.P(5, 0, 5, 0);
+        _netTile.Margin = Theme.P(5, 0, 0, 0);
         tiles.Controls.Add(_vpnTile, 0, 0);
         tiles.Controls.Add(_protTile, 1, 0);
         tiles.Controls.Add(_netTile, 2, 0);
@@ -445,16 +472,16 @@ public sealed class MainForm : Form
 
         // --- причина ---
         _reasonCard.Dock = DockStyle.Fill;
-        _reasonCard.Height = 78;
-        _reasonCard.Margin = new Padding(0, 0, 0, 10);
-        _reasonCard.Padding = new Padding(18, 10, 18, 8);
+        _reasonCard.Margin = Theme.P(0, 0, 0, 10);
+        _reasonCard.Padding = Theme.P(18, 8, 18, 6);
         _reasonText.Dock = DockStyle.Fill;
         _reasonText.Font = Theme.Body;
         _reasonText.ForeColor = Theme.Text;
         _reasonText.BackColor = Color.Transparent;
         _reasonText.Text = "Причина: —";
+        _reasonText.AutoEllipsis = true;
         _reasonCode.Dock = DockStyle.Bottom;
-        _reasonCode.Height = 22;
+        _reasonCode.Height = Theme.S(22);
         _reasonCode.Font = Theme.Mono;
         _reasonCode.ForeColor = Theme.Muted;
         _reasonCode.BackColor = Color.Transparent;
@@ -465,9 +492,8 @@ public sealed class MainForm : Form
 
         // --- профиль прокси ---
         _profileCard.Dock = DockStyle.Fill;
-        _profileCard.Height = 56;
-        _profileCard.Margin = new Padding(0, 0, 0, 10);
-        _profileCard.Padding = new Padding(18, 10, 12, 10);
+        _profileCard.Margin = Theme.P(0, 0, 0, 10);
+        _profileCard.Padding = Theme.P(18, 8, 10, 8);
         _profileText.Dock = DockStyle.Fill;
         _profileText.Font = Theme.Body;
         _profileText.ForeColor = Theme.Muted;
@@ -477,7 +503,7 @@ public sealed class MainForm : Form
         _profileText.Text = "Профиль: —";
         StyleButton(_importBtn, "Импорт профиля…", Theme.Ghost, Theme.Blue, Theme.GhostHover);
         _importBtn.Dock = DockStyle.Right;
-        _importBtn.Width = 170;
+        _importBtn.Width = Theme.S(180);
         _importBtn.Margin = Padding.Empty;
         _importBtn.Click += async (_, _) => await ImportProfileAsync();
         _profileCard.Controls.Add(_profileText);
@@ -488,11 +514,10 @@ public sealed class MainForm : Form
         var buttons = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Height = 44,
             ColumnCount = 3,
             RowCount = 1,
             BackColor = Theme.Bg,
-            Margin = new Padding(0, 0, 0, 10)
+            Margin = Theme.P(0, 0, 0, 10)
         };
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
         buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
@@ -522,8 +547,8 @@ public sealed class MainForm : Form
         root.Controls.Add(buttons, 0, 5);
 
         // --- журнал ---
-        var logCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 14, 12), Margin = Padding.Empty };
-        var logHeader = new Panel { Dock = DockStyle.Top, Height = 28, BackColor = Color.Transparent };
+        var logCard = new Card { Dock = DockStyle.Fill, Padding = Theme.P(14, 8, 14, 12), Margin = Padding.Empty };
+        var logHeader = new Panel { Dock = DockStyle.Top, Height = Theme.S(28), BackColor = Color.Transparent };
         var openLog = new LinkLabel
         {
             Text = "открыть файл",
@@ -570,10 +595,10 @@ public sealed class MainForm : Form
     private void FitLogColumns()
     {
         if (_logView.Columns.Count != 3) return;
-        int time = LogicalToDeviceUnits(70), lvl = LogicalToDeviceUnits(56);
+        int time = Theme.S(70), lvl = Theme.S(56);
         _logView.Columns[0].Width = time;
         _logView.Columns[1].Width = lvl;
-        _logView.Columns[2].Width = Math.Max(LogicalToDeviceUnits(200), _logView.ClientSize.Width - time - lvl - 4);
+        _logView.Columns[2].Width = Math.Max(Theme.S(200), _logView.ClientSize.Width - time - lvl - Theme.S(4));
     }
 
     private static void StyleButton(Button b, string text, Color fill, Color fore, Color hover)
@@ -589,7 +614,7 @@ public sealed class MainForm : Form
         b.BackColor = fill;
         b.ForeColor = fore;
         b.Font = Theme.Semi;
-        b.Margin = new Padding(0, 0, 8, 0);
+        b.Margin = Theme.P(0, 0, 8, 0);
         b.Cursor = Cursors.Hand;
     }
 
@@ -1053,13 +1078,13 @@ internal sealed class ProfileDialog : Form
     public ProfileDialog()
     {
         Text = "Импорт профиля прокси";
-        ClientSize = new Size(620, 400);
-        MinimumSize = new Size(480, 320);
+        AutoScaleMode = AutoScaleMode.None;
+        ClientSize = new Size(Theme.S(620), Theme.S(420));
+        MinimumSize = new Size(Theme.S(480), Theme.S(340));
         StartPosition = FormStartPosition.CenterParent;
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
         Font = Theme.Body;
-        AutoScaleMode = AutoScaleMode.Dpi;
         ShowInTaskbar = false;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -1067,10 +1092,10 @@ internal sealed class ProfileDialog : Form
         var hint = new Label
         {
             Dock = DockStyle.Top,
-            Height = 64,
+            Height = Theme.S(70),
             ForeColor = Theme.Muted,
             Font = Theme.Small,
-            Padding = new Padding(14, 10, 14, 0),
+            Padding = Theme.P(14, 10, 14, 0),
             Text = "Вставьте ссылку vless:// · vmess:// · trojan:// · ss:// · hysteria2://, " +
                    "конфиг Xray (JSON) или outbound sing-box. Через прокси пойдёт только Claude Desktop, " +
                    "остальной компьютер — напрямую. Для применения нужны права администратора."
@@ -1085,15 +1110,15 @@ internal sealed class ProfileDialog : Form
         _box.ForeColor = Theme.Text;
         _box.BorderStyle = BorderStyle.FixedSingle;
         _box.Font = Theme.Mono;
-        var boxHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 6, 14, 6), BackColor = Theme.Bg };
+        var boxHost = new Panel { Dock = DockStyle.Fill, Padding = Theme.P(14, 6, 14, 6), BackColor = Theme.Bg };
         boxHost.Controls.Add(_box);
 
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = 52,
+            Height = Theme.S(56),
             FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(10, 8, 10, 8),
+            Padding = Theme.P(10, 8, 10, 8),
             BackColor = Theme.Bg
         };
         var ok = MakeButton("Применить", Theme.Green, Theme.Bg);
@@ -1125,15 +1150,15 @@ internal sealed class ProfileDialog : Form
         var b = new Button
         {
             Text = text,
-            Width = 130,
-            Height = 34,
+            Width = Theme.S(140),
+            Height = Theme.S(36),
             FlatStyle = FlatStyle.Flat,
             BackColor = fill,
             ForeColor = fore,
             Font = Theme.Semi,
             UseVisualStyleBackColor = false,
             Cursor = Cursors.Hand,
-            Margin = new Padding(6, 0, 0, 0)
+            Margin = Theme.P(6, 0, 0, 0)
         };
         b.FlatAppearance.BorderColor = Theme.Border;
         return b;
@@ -1149,13 +1174,13 @@ internal sealed class GuideDialog : Form
     public GuideDialog(SystemProxyState proxy)
     {
         Text = "Гайд: Claude Guard вместе с другим VPN";
-        ClientSize = new Size(640, 560);
-        MinimumSize = new Size(520, 420);
+        AutoScaleMode = AutoScaleMode.None;
+        ClientSize = new Size(Theme.S(660), Theme.S(600));
+        MinimumSize = new Size(Theme.S(520), Theme.S(440));
         StartPosition = FormStartPosition.CenterParent;
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
         Font = Theme.Body;
-        AutoScaleMode = AutoScaleMode.Dpi;
         ShowInTaskbar = false;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -1190,8 +1215,8 @@ internal sealed class GuideDialog : Form
         var status = new Label
         {
             Dock = DockStyle.Top,
-            Height = 52,
-            Padding = new Padding(14, 12, 14, 0),
+            Height = Theme.S(64),
+            Padding = Theme.P(14, 12, 14, 0),
             Font = Theme.Semi,
             ForeColor = proxy.Enabled && !proxy.BypassOk || !string.IsNullOrWhiteSpace(proxy.AutoConfigUrl) ? Theme.Amber : Theme.Green,
             Text = current
@@ -1209,14 +1234,14 @@ internal sealed class GuideDialog : Form
             Text = text,
             TabStop = false
         };
-        var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 6, 14, 6), BackColor = Theme.Bg };
+        var host = new Panel { Dock = DockStyle.Fill, Padding = Theme.P(14, 6, 14, 6), BackColor = Theme.Bg };
         host.Controls.Add(body);
 
         var close = new Button
         {
             Text = "Понятно",
-            Width = 130,
-            Height = 34,
+            Width = Theme.S(140),
+            Height = Theme.S(36),
             FlatStyle = FlatStyle.Flat,
             BackColor = Theme.Green,
             ForeColor = Theme.Bg,
@@ -1228,9 +1253,9 @@ internal sealed class GuideDialog : Form
         var bar = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = 52,
+            Height = Theme.S(56),
             FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(10, 8, 10, 8),
+            Padding = Theme.P(10, 8, 10, 8),
             BackColor = Theme.Bg
         };
         bar.Controls.Add(close);
