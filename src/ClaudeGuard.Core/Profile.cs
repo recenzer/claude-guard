@@ -330,6 +330,13 @@ public static class ProfileParser
             throw new FormatException("Похоже на ссылку подписки или сайта, а не на прокси. " +
                                       "Откройте подписку и скопируйте из неё ссылку vless:// / trojan:// и т. п.");
 
+        // provider format without '@': host:port:user:pass
+        if (!authority.Contains('@') && authority.Count(c => c == ':') == 3 && !authority.StartsWith('['))
+        {
+            var f = authority.Split(':');
+            link = $"{scheme}://{Uri.EscapeDataString(f[2])}:{Uri.EscapeDataString(f[3])}@{f[0]}:{f[1]}{rest[authority.Length..]}";
+        }
+
         var p = SplitLink(link);
         var ob = new JsonObject
         {
@@ -341,12 +348,29 @@ public static class ProfileParser
         if (type == "socks") ob["version"] = "5";
         if (!string.IsNullOrEmpty(p.RawUserInfo))
         {
-            var colon = p.RawUserInfo.IndexOf(':');
-            ob["username"] = Uri.UnescapeDataString(colon >= 0 ? p.RawUserInfo[..colon] : p.RawUserInfo);
-            if (colon >= 0) ob["password"] = Uri.UnescapeDataString(p.RawUserInfo[(colon + 1)..]);
+            string user, pass = null;
+            var raw = p.RawUserInfo;
+            var colon = raw.IndexOf(':');
+            if (colon >= 0)
+            {
+                user = Uri.UnescapeDataString(raw[..colon]);
+                pass = Uri.UnescapeDataString(raw[(colon + 1)..]);
+            }
+            else if (TryBase64(Uri.UnescapeDataString(raw), out var decoded) && decoded.Contains(':')
+                     && decoded.All(ch => !char.IsControl(ch)))
+            {
+                // v2rayN / 3x-ui style: socks://base64(user:pass)@host:port
+                var c = decoded.IndexOf(':');
+                user = decoded[..c];
+                pass = decoded[(c + 1)..];
+            }
+            else user = Uri.UnescapeDataString(raw);
+
+            ob["username"] = user;
+            if (pass != null) ob["password"] = pass;
         }
         if (scheme == "https")
-            ob["tls"] = new JsonObject { ["enabled"] = true, ["server_name"] = p.Query["sni"] ?? p.Host };
+            ob["tls"] = new JsonObject { ["enabled"] = true, ["server_name"] = p.Query.Get("sni") ?? p.Host };
         return Make(ob, p.Name, scheme == "https" ? "https" : type == "socks" ? "socks5" : "http", p.Host, p.Port);
     }
 

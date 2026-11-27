@@ -42,6 +42,8 @@ public sealed class GuardStatus
     public DateTimeOffset Updated { get; set; } = DateTimeOffset.Now;
     public string Version { get; set; } = "";
     public string PausedUntilRestart { get; set; } = "";
+    /// <summary>Claude is closed: proxy probing paused to save traffic.</summary>
+    public bool ProbeIdle { get; set; }
 }
 
 public sealed record LogEvent(DateTimeOffset Ts, string Level, string Code, string Message);

@@ -58,6 +58,8 @@ internal static class Program
 
     private static int ImportProfileElevated()
     {
+        // no MainForm in this process: take the DPI scale from the screen
+        try { using var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero); Theme.Scale = g.DpiX / 96f; } catch { }
         while (true)
         {
             string text;
