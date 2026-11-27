@@ -208,10 +208,13 @@ if (-not $SkipSelfTest) {
         $selftestOk = $true
         Write-Ok "Самопроверка пройдена"
         foreach ($s in $json.Steps) { Write-Host "      $s" -ForegroundColor DarkGray }
-    } elseif ($json -and ($json.Error -match 'нет профиля прокси')) {
-        Write-Warn2 "Профиль прокси ещё не задан — физический блок проверен, проверка прокси пропущена."
-        Write-Warn2 "Claude будет заблокирован, пока вы не импортируете профиль в окне Claude Guard."
+    } elseif ($json -and $json.FirewallOk) {
+        # firewall works; only the proxy part failed (no profile / wrong credentials / server down).
+        # Claude stays blocked (fail-closed) until a working profile is imported — no rollback.
         foreach ($s in $json.Steps) { Write-Host "      $s" -ForegroundColor DarkGray }
+        Write-Warn2 "Блокировка firewall проверена. Прокси не работает: $($json.Error)"
+        Write-Warn2 "После установки откройте Claude Guard → «Импорт профиля…» и вставьте рабочую ссылку."
+        Write-Warn2 "До этого Claude Desktop будет заблокирован."
         $selftestOk = $true
     } else {
         $err = if ($json) { $json.Error } else { 'не удалось разобрать результат' }

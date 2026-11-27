@@ -7,6 +7,8 @@ namespace ClaudeGuard.Core;
 public sealed class SelfTestResult
 {
     public bool Ok { get; set; }
+    /// <summary>Claude rules exist and the non-TUN block works; proxy checks may still fail.</summary>
+    public bool FirewallOk { get; set; }
     public List<string> Steps { get; } = new();
     public string Error { get; set; } = "";
 }
@@ -952,7 +954,9 @@ public sealed class GuardEngine : IDisposable
                 if (!t2.Ok) r.Steps.Add("WARN: прямой выход недоступен и без правила — проверка блока неинформативна");
             }
 
-            // 2) proxy part
+            // 2) proxy part. Firewall is verified at this point: a broken profile only keeps
+            // Claude blocked (fail-closed) and is fixed by re-importing, not by rolling back.
+            r.FirewallOk = true;
             if (_profile == null) { r.Error = "нет профиля прокси"; return r; }
             r.Steps.Add($"profile={_profile.Protocol} {_profile.Server}:{_profile.Port}");
 
@@ -974,7 +978,13 @@ public sealed class GuardEngine : IDisposable
             var viaProxy = TunnelProbe.RunViaSocks(new IPEndPoint(IPAddress.Loopback, epNow.Port), epNow.User, epNow.Pass,
                 _cfg.ProbeTargets[0], _cfg.ProbeTimeoutMs);
             r.Steps.Add($"probe_via_proxy ok={viaProxy.Ok} code={viaProxy.Code} ms={viaProxy.ElapsedMs} {viaProxy.Message}");
-            if (!viaProxy.Ok) { r.Error = "прокси не пропускает трафик: " + viaProxy.Message; return r; }
+            if (!viaProxy.Ok)
+            {
+                Thread.Sleep(300); // let sing-box print why the outbound failed
+                var why = _singBox.RecentProxyError;
+                r.Error = "прокси не пропускает трафик: " + (string.IsNullOrEmpty(why) ? viaProxy.Message : why);
+                return r;
+            }
 
             // 3) the TUN interface must NOT fall under the physical block (Claude goes there)
             var viaTun = TunnelProbe.Run(IPAddress.Parse(tun.Ipv4), _cfg.ProbeTargets[0], _cfg.ProbeTimeoutMs);
