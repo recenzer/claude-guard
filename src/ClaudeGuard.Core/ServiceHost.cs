@@ -89,7 +89,7 @@ public static class ServiceHost
             {
                 case ControlStop:
                 case ControlShutdown:
-                    ReportStatus(ServiceStopPending, 0, 5000);
+                    ReportStatus(ServiceStopPending, 0, 20000);
                     _stopEvent.Set();
                     return 0;
                 case ControlInterrogate:

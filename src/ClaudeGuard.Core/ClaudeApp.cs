@@ -57,6 +57,34 @@ public static class ClaudeApp
         }
     }
 
+    /// <summary>Every Claude package folder that matters now: the registered/newest one plus
+    /// the folders of all running claude.exe (during an MSIX update old and new may run at once).</summary>
+    public static List<string> FindAllInstallDirs(Config cfg)
+    {
+        var dirs = new List<string>();
+        var primary = FindInstallDir(cfg);
+        if (!string.IsNullOrEmpty(primary)) dirs.Add(primary);
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("claude"))
+            {
+                try
+                {
+                    var path = p.MainModule?.FileName;
+                    if (path != null && path.Contains(@"\WindowsApps\Claude_", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var root = PackageRoot(path);
+                        if (!string.IsNullOrEmpty(root)) dirs.Add(root);
+                    }
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+        }
+        catch { }
+        return dirs.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     private static string PackageRoot(string filePath)
     {
         var dir = Path.GetDirectoryName(filePath);
@@ -186,9 +214,9 @@ public static class ClaudeApp
 
     /// <summary>True if a claude.exe from a Claude package runs outside the known install dir,
     /// e.g. right after an MSIX update moved the app to a new versioned folder.</summary>
-    public static bool HasUnknownPackageProcess(string installDir)
+    public static bool HasUnknownPackageProcess(IReadOnlyCollection<string> installDirs)
     {
-        var prefix = string.IsNullOrWhiteSpace(installDir) ? null : installDir.TrimEnd('\\') + "\\";
+        var prefixes = installDirs.Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => d.TrimEnd('\\') + "\\").ToList();
         var found = false;
         foreach (var p in Process.GetProcessesByName("claude"))
         {
@@ -197,7 +225,7 @@ public static class ClaudeApp
                 var path = p.MainModule?.FileName;
                 if (path != null
                     && path.Contains(@"\WindowsApps\Claude_", StringComparison.OrdinalIgnoreCase)
-                    && (prefix == null || !path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                    && !prefixes.Any(pr => path.StartsWith(pr, StringComparison.OrdinalIgnoreCase)))
                     found = true;
             }
             catch { }

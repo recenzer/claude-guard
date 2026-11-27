@@ -46,8 +46,7 @@ public static class SingBoxConfig
                     new JsonObject { ["type"] = "local", ["tag"] = "dns-local" }
                 },
                 ["rules"] = dnsRules,
-                ["final"] = "dns-local",
-                ["strategy"] = "ipv4_only"
+                ["final"] = "dns-local"
             },
             ["inbounds"] = new JsonArray
             {
@@ -87,7 +86,10 @@ public static class SingBoxConfig
                     new JsonObject { ["action"] = "sniff" },
                     new JsonObject { ["protocol"] = "dns", ["action"] = "hijack-dns" },
                     new JsonObject { ["inbound"] = new JsonArray { ProbeInboundTag }, ["outbound"] = "proxy" },
-                    new JsonObject { ["process_path_regex"] = processRegex, ["outbound"] = "proxy" }
+                    new JsonObject { ["process_path_regex"] = processRegex, ["outbound"] = "proxy" },
+                    // safety net: any process talking to Claude domains (helpers outside the package,
+                    // sockets whose owner process could not be resolved) still goes to the proxy
+                    new JsonObject { ["domain_suffix"] = dnsDomains.DeepClone(), ["outbound"] = "proxy" }
                 },
                 ["final"] = "direct"
             }
@@ -103,6 +105,9 @@ public static class SingBoxConfig
         var i = pfn.IndexOf('_');
         var publisher = i >= 0 ? pfn[(i + 1)..] : pfn;
         yield return @"(?i)\\WindowsApps\\Claude_[^\\]+__" + Re2Escape(publisher) + @"\\";
+        // bundled Claude Code and per-user helper binaries live outside the package folder
+        yield return @"(?i)\\AppData\\Roaming\\Claude\\";
+        yield return @"(?i)\\AppData\\Local\\AnthropicClaude\\";
         if (!string.IsNullOrWhiteSpace(cfg.ClaudeInstallDirOverride))
             yield return "(?i)^" + Re2Escape(cfg.ClaudeInstallDirOverride.TrimEnd('\\')) + @"\\";
     }
@@ -132,8 +137,12 @@ public sealed class SingBoxRunner : IDisposable
     private int _logBudget;
     private DateTimeOffset _logBudgetReset = DateTimeOffset.MinValue;
     private readonly Queue<string> _lastLines = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> _checkers = new();
 
     public SingBoxRunner(string exePath) => _exe = exePath;
+
+    /// <summary>Server address to hide in logged sing-box output (logs are readable by all users).</summary>
+    public string RedactHost { get; set; } = "";
 
     public string ExePath => _exe;
     public bool Exists => File.Exists(_exe);
@@ -177,6 +186,9 @@ public sealed class SingBoxRunner : IDisposable
             psi.ArgumentList.Add("-c");
             psi.ArgumentList.Add(configPath);
             using var p = Process.Start(psi)!;
+            _checkers[p.Id] = 0; // KillOrphans must not kill a running `check`
+            try
+            {
             var errTask = p.StandardError.ReadToEndAsync();
             var outTask = p.StandardOutput.ReadToEndAsync();
             if (!p.WaitForExit(timeoutMs))
@@ -187,6 +199,8 @@ public sealed class SingBoxRunner : IDisposable
             if (p.ExitCode == 0) return null;
             var text = (errTask.Result + " " + outTask.Result).Trim();
             return string.IsNullOrEmpty(text) ? $"sing-box check: код {p.ExitCode}" : text;
+            }
+            finally { _checkers.TryRemove(p.Id, out _); }
         }
         catch (Exception ex)
         {
@@ -267,6 +281,7 @@ public sealed class SingBoxRunner : IDisposable
         {
             try
             {
+                if (_checkers.ContainsKey(p.Id)) continue;
                 var path = p.MainModule?.FileName;
                 if (path != null && string.Equals(Path.GetFullPath(path), Path.GetFullPath(_exe), StringComparison.OrdinalIgnoreCase))
                 {
@@ -283,6 +298,8 @@ public sealed class SingBoxRunner : IDisposable
     private void OnLine(string line)
     {
         if (string.IsNullOrWhiteSpace(line)) return;
+        var host = RedactHost;
+        if (!string.IsNullOrEmpty(host)) line = line.Replace(host, "<server>", StringComparison.OrdinalIgnoreCase);
         lock (_lastLines)
         {
             _lastLines.Enqueue(line.Length > 300 ? line[..300] : line);

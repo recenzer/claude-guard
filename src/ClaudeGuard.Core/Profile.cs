@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Web;
 
 namespace ClaudeGuard.Core;
 
@@ -50,7 +49,7 @@ public static class ProfileStore
 
     public static void Save(Config cfg, ProxyProfile profile)
     {
-        Directory.CreateDirectory(cfg.SecretsDir);
+        SecureDir.Ensure(cfg.SecretsDir);
         var p = PathFor(cfg);
         var tmp = p + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(profile, Opts), new UTF8Encoding(false));
@@ -117,10 +116,11 @@ public static class ProfileParser
     private sealed class LinkParts
     {
         public string UserInfo = "";
+        public string RawUserInfo = "";
         public string Host = "";
         public int Port;
         public string Name = "";
-        public System.Collections.Specialized.NameValueCollection Query = new();
+        public Dictionary<string, string> Query = new(StringComparer.OrdinalIgnoreCase);
     }
 
     private static LinkParts SplitLink(string link)
@@ -137,7 +137,7 @@ public static class ProfileParser
         var q = rest.IndexOf('?');
         if (q >= 0)
         {
-            p.Query = HttpUtility.ParseQueryString(rest[(q + 1)..]);
+            p.Query = ParseQuery(rest[(q + 1)..]);
             rest = rest[..q];
         }
         rest = rest.TrimEnd('/');
@@ -145,7 +145,8 @@ public static class ProfileParser
         var at = rest.LastIndexOf('@');
         if (at >= 0)
         {
-            p.UserInfo = Uri.UnescapeDataString(rest[..at]);
+            p.RawUserInfo = rest[..at];
+            p.UserInfo = Uri.UnescapeDataString(p.RawUserInfo);
             rest = rest[(at + 1)..];
         }
 
@@ -170,6 +171,23 @@ public static class ProfileParser
         return p;
     }
 
+    /// <summary>Query parser that, unlike HttpUtility, keeps '+' literal (it occurs in passwords and paths).
+    /// Missing keys return null through the indexer wrapper below.</summary>
+    private static Dictionary<string, string> ParseQuery(string query)
+    {
+        var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            var k = Uri.UnescapeDataString(eq >= 0 ? pair[..eq] : pair);
+            var v = eq >= 0 ? Uri.UnescapeDataString(pair[(eq + 1)..]) : "";
+            d.TryAdd(k, v);
+        }
+        return d;
+    }
+
+    private static string Get(this Dictionary<string, string> q, string key) => q.TryGetValue(key, out var v) ? v : null;
+
     private static ProxyProfile ParseVlessTrojan(string link, string protocol)
     {
         var p = SplitLink(link);
@@ -187,7 +205,7 @@ public static class ProfileParser
         if (protocol == "vless")
         {
             ob["uuid"] = p.UserInfo;
-            var flow = NormalizeFlow(q["flow"]);
+            var flow = NormalizeFlow(q.Get("flow"));
             if (!string.IsNullOrEmpty(flow)) ob["flow"] = flow;
             ob["packet_encoding"] = "xudp";
         }
@@ -196,12 +214,14 @@ public static class ProfileParser
             ob["password"] = p.UserInfo;
         }
 
-        var security = (q["security"] ?? (protocol == "trojan" ? "tls" : "none")).ToLowerInvariant();
-        var tls = BuildTls(security, q["sni"] ?? q["peer"], q["fp"], q["alpn"],
-            IsTrue(q["allowInsecure"]) || IsTrue(q["insecure"]), q["pbk"], q["sid"], p.Host);
+        var security = (q.Get("security") ?? (protocol == "trojan" ? "tls" : "none")).ToLowerInvariant();
+        var tls = BuildTls(security, q.Get("sni") ?? q.Get("peer"), q.Get("fp"), q.Get("alpn"),
+            IsTrue(q.Get("allowInsecure")) || IsTrue(q.Get("insecure")), q.Get("pbk"), q.Get("sid"), p.Host);
         if (tls != null) ob["tls"] = tls;
 
-        var transport = BuildTransport(q["type"], q["host"], q["path"], q["serviceName"], q["headerType"]);
+        var path = q.Get("path");
+        if (!string.IsNullOrEmpty(q.Get("ed")) && path != null && !path.Contains("?ed=")) path += "?ed=" + q.Get("ed");
+        var transport = BuildTransport(q.Get("type"), q.Get("host"), path, q.Get("serviceName"), q.Get("headerType"));
         if (transport != null) ob["transport"] = transport;
 
         return Make(ob, p.Name, protocol, p.Host, p.Port);
@@ -236,7 +256,8 @@ public static class ProfileParser
             ["packet_encoding"] = "xudp"
         };
         var tlsMode = S("tls").ToLowerInvariant();
-        var tls = BuildTls(tlsMode == "tls" ? "tls" : "none", S("sni"), S("fp"), S("alpn"), false, null, null,
+        var tls = BuildTls(tlsMode == "tls" ? "tls" : "none", S("sni"), S("fp"), S("alpn"),
+            IsTrue(S("allowInsecure")) || IsTrue(S("insecure")) || IsTrue(S("skip-cert-verify")), null, null,
             string.IsNullOrEmpty(S("host")) ? host : S("host"));
         if (tls != null) ob["tls"] = tls;
         var transport = BuildTransport(S("net"), S("host"), S("path"), S("path"), S("type"));
@@ -253,7 +274,13 @@ public static class ProfileParser
         var hash = body.IndexOf('#');
         if (hash >= 0) { name = Uri.UnescapeDataString(body[(hash + 1)..]); body = body[..hash]; }
         var q = body.IndexOf('?');
-        if (q >= 0) body = body[..q];
+        if (q >= 0)
+        {
+            var sq = ParseQuery(body[(q + 1)..]);
+            if (!string.IsNullOrEmpty(sq.Get("plugin")))
+                throw new FormatException($"Shadowsocks-плагин «{sq.Get("plugin").Split(';')[0]}» не поддерживается");
+            body = body[..q];
+        }
         body = body.TrimEnd('/');
 
         string userInfo;
@@ -312,11 +339,11 @@ public static class ProfileParser
             ["server_port"] = p.Port
         };
         if (type == "socks") ob["version"] = "5";
-        if (!string.IsNullOrEmpty(p.UserInfo))
+        if (!string.IsNullOrEmpty(p.RawUserInfo))
         {
-            var colon = p.UserInfo.IndexOf(':');
-            ob["username"] = colon >= 0 ? p.UserInfo[..colon] : p.UserInfo;
-            if (colon >= 0) ob["password"] = p.UserInfo[(colon + 1)..];
+            var colon = p.RawUserInfo.IndexOf(':');
+            ob["username"] = Uri.UnescapeDataString(colon >= 0 ? p.RawUserInfo[..colon] : p.RawUserInfo);
+            if (colon >= 0) ob["password"] = Uri.UnescapeDataString(p.RawUserInfo[(colon + 1)..]);
         }
         if (scheme == "https")
             ob["tls"] = new JsonObject { ["enabled"] = true, ["server_name"] = p.Query["sni"] ?? p.Host };
@@ -330,10 +357,10 @@ public static class ProfileParser
         var tls = new JsonObject
         {
             ["enabled"] = true,
-            ["server_name"] = q["sni"] ?? p.Host,
-            ["insecure"] = IsTrue(q["insecure"])
+            ["server_name"] = q.Get("sni") ?? p.Host,
+            ["insecure"] = IsTrue(q.Get("insecure"))
         };
-        if (!string.IsNullOrEmpty(q["alpn"])) tls["alpn"] = ToArray(q["alpn"]);
+        if (!string.IsNullOrEmpty(q.Get("alpn"))) tls["alpn"] = ToArray(q.Get("alpn"));
         var ob = new JsonObject
         {
             ["type"] = "hysteria2",
@@ -343,8 +370,8 @@ public static class ProfileParser
             ["password"] = p.UserInfo,
             ["tls"] = tls
         };
-        if (string.Equals(q["obfs"], "salamander", StringComparison.OrdinalIgnoreCase))
-            ob["obfs"] = new JsonObject { ["type"] = "salamander", ["password"] = q["obfs-password"] ?? "" };
+        if (string.Equals(q.Get("obfs"), "salamander", StringComparison.OrdinalIgnoreCase))
+            ob["obfs"] = new JsonObject { ["type"] = "salamander", ["password"] = q.Get("obfs-password") ?? "" };
         return Make(ob, p.Name, "hysteria2", p.Host, p.Port);
     }
 
@@ -460,7 +487,7 @@ public static class ProfileParser
             {
                 var t = stream["tlsSettings"] as JsonObject ?? new JsonObject();
                 tlsNode = BuildTls("tls", t["serverName"]?.ToString(), t["fingerprint"]?.ToString(),
-                    JoinArray(t["alpn"]), (bool?)t["allowInsecure"] ?? false, null, null, host);
+                    JoinArray(t["alpn"]), IsTrue(t["allowInsecure"]?.ToString()), null, null, host);
             }
             else if (security == "reality")
             {
@@ -630,7 +657,7 @@ public static class ProfileParser
         _ => n.ToString()
     };
 
-    private static bool IsTrue(string v) => v is "1" or "true" or "True" or "TRUE";
+    private static bool IsTrue(string v) => v != null && (v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Port/number that may be stored either as a JSON number or as a string.</summary>
     private static int Int(JsonNode n)

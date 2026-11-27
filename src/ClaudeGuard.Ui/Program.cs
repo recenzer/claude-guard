@@ -22,11 +22,11 @@ internal static class Program
             Environment.Exit(Elevated("resume"));
             return;
         }
-        // elevated helper: apply a profile from a temp file written by the non-elevated UI
-        var spIdx = Array.FindIndex(args, a => a.Equals("--set-profile", StringComparison.OrdinalIgnoreCase));
-        if (spIdx >= 0)
+        // elevated helper: the profile is typed/pasted here, inside the elevated process
+        if (args.Any(a => a.Equals("--import-profile", StringComparison.OrdinalIgnoreCase)))
         {
-            Environment.Exit(SetProfileFromFile(spIdx + 1 < args.Length ? args[spIdx + 1] : null));
+            ApplicationConfiguration.Initialize();
+            Environment.Exit(ImportProfileElevated());
             return;
         }
 
@@ -56,22 +56,36 @@ internal static class Program
         GC.KeepAlive(mutex);
     }
 
-    private static int SetProfileFromFile(string path)
+    private static int ImportProfileElevated()
     {
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return 3;
-        var resultFile = path + ".result";
-        try
+        while (true)
         {
-            var text = File.ReadAllText(path);
-            try { File.Delete(path); } catch { }
-            var r = Ipc.Call(new GuardRequest { Cmd = "set-profile", Payload = text }, 60000);
-            File.WriteAllText(resultFile, r.Ok ? "OK " + r.Profile?.Summary : (r.Error ?? "ошибка"));
-            return r.Ok ? 0 : 1;
-        }
-        catch (Exception ex)
-        {
-            try { File.WriteAllText(resultFile, ex.Message); } catch { }
-            return 2;
+            string text;
+            using (var dlg = new ProfileDialog())
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return 1;
+                text = dlg.ProfileText;
+            }
+            if (string.IsNullOrWhiteSpace(text)) return 1;
+
+            string error;
+            try
+            {
+                ProfileParser.Parse(text); // quick local check
+                var r = Ipc.Call(new GuardRequest { Cmd = "set-profile", Payload = text }, 90000);
+                if (r.Ok)
+                {
+                    MessageBox.Show("Профиль применён:\n" + r.Profile?.Summary, "Claude Guard",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 0;
+                }
+                error = r.Error;
+            }
+            catch (Exception ex) { error = ex.Message; }
+
+            if (MessageBox.Show("Профиль не применён:\n" + error + "\n\nПопробовать другой?", "Claude Guard",
+                    MessageBoxButtons.RetryCancel, MessageBoxIcon.Error) != DialogResult.Retry)
+                return 1;
         }
     }
 

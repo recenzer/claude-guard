@@ -37,6 +37,9 @@ public sealed class GuardEngine : IDisposable
         public int Generation;  // sing-box generation the probe ran against
     }
 
+    /// <summary>Published atomically after a successful sing-box start.</summary>
+    private sealed record ProbeEndpoint(int Generation, int Port, string User, string Pass);
+
     private readonly Config _cfg;
     private readonly Firewall _fw;
     private readonly string _probeExe;
@@ -52,9 +55,7 @@ public sealed class GuardEngine : IDisposable
     // ---- sing-box ----
     private ProxyProfile _profile;
     private volatile int _singBoxGeneration;
-    private volatile int _socksPort;
-    private volatile string _socksUser = "";
-    private volatile string _socksPass = "";
+    private ProbeEndpoint _endpoint; // Volatile.Read/Write
     private DateTimeOffset _singBoxStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset _nextSingBoxStart = DateTimeOffset.MinValue;
     private int _singBoxRestarts;
@@ -63,6 +64,8 @@ public sealed class GuardEngine : IDisposable
     // ---- probe ----
     private ProbeSnapshot _probe; // written by the probe thread, read via Volatile
     private long _lastCountedProbeTicks;
+    private long _lastStaleCountTicks;
+    private string _proxyConflict; // non-null: another client's loopback system proxy bypasses the TUN
     private long _waitProbeSince = Environment.TickCount64;
 
     // ---- state ----
@@ -84,7 +87,8 @@ public sealed class GuardEngine : IDisposable
     private DateTimeOffset _lastScan = DateTimeOffset.MinValue;
     private DateTimeOffset _lastProcScan = DateTimeOffset.MinValue;
     private List<string> _programs = new();
-    private string _installDir = "";
+    private string _installDir = "";               // primary (newest/registered) package folder
+    private List<string> _installDirs = new();     // all folders whose exes are protected
     private string _physicalIp = "";
     private string _tunIp = "";
     private bool _firewallEnabled = true;
@@ -166,7 +170,7 @@ public sealed class GuardEngine : IDisposable
 
     /// <summary>Parses and validates the profile (sing-box check) on the caller thread,
     /// then applies it on the engine thread.</summary>
-    public ProfileResult SetProfile(string input, int timeoutMs = 30000)
+    public ProfileResult SetProfile(string input, int timeoutMs = 75000)
     {
         ProxyProfile profile;
         try { profile = ProfileParser.Parse(input); }
@@ -182,7 +186,7 @@ public sealed class GuardEngine : IDisposable
             {
                 ProfileStore.Save(_cfg, profile);
                 _profile = profile;
-                Log.Info("PROFILE_SET", "Профиль прокси: " + profile.Summary);
+                Log.Info("PROFILE_SET", $"Профиль прокси: {profile.Protocol}" + (string.IsNullOrEmpty(profile.Name) ? "" : $" «{profile.Name}»"));
                 RestartSingBox("новый профиль");
                 tcs.TrySetResult(new ProfileResult { Ok = true, Summary = profile.Summary });
             }
@@ -197,6 +201,7 @@ public sealed class GuardEngine : IDisposable
         _profile = null;
         _singBox.Stop();
         _singBoxGeneration++;
+        Volatile.Write(ref _endpoint, null);
         Log.Warn("PROFILE_CLEARED", "Профиль прокси удалён — Claude заблокирован");
     });
 
@@ -257,6 +262,7 @@ public sealed class GuardEngine : IDisposable
                 try { _fw.RemoveAll(); } catch (Exception ex) { Log.Error("FW_REMOVE", ex.Message); }
                 _singBox.Stop();
                 _singBoxGeneration++;
+                Volatile.Write(ref _endpoint, null);
                 _rulesRemovedForPause = true;
                 _blockAll = false;
                 SetState(GuardState.Paused, ReasonCodes.Paused, "Защита отключена пользователем", forceLog: true);
@@ -347,6 +353,12 @@ public sealed class GuardEngine : IDisposable
             }
         }
 
+        if (failCode == null && !pending && _proxyConflict != null)
+        {
+            failCode = ReasonCodes.SystemProxyConflict;
+            failText = _proxyConflict;
+        }
+
         if (failCode == null && !pending && !_firewallEnabled)
         {
             failCode = ReasonCodes.FirewallDisabled;
@@ -364,7 +376,12 @@ public sealed class GuardEngine : IDisposable
             {
                 // no result for the current sing-box yet: wait, but not forever
                 if (Environment.TickCount64 - _waitProbeSince < maxAgeMs) pending = true;
-                else { failCode = ReasonCodes.ProbeTimeout; failText = "Нет результата проверки прокси"; }
+                else
+                {
+                    failCode = ReasonCodes.ProbeTimeout;
+                    failText = "Нет результата проверки прокси";
+                    newProbeResult = StaleTick();
+                }
             }
             else
             {
@@ -373,7 +390,7 @@ public sealed class GuardEngine : IDisposable
                 {
                     failCode = ReasonCodes.ProbeTimeout;
                     failText = "Нет свежего результата проверки прокси";
-                    newProbeResult = true; // staleness counts once per interval below
+                    newProbeResult = StaleTick(); // a missing result counts once per probe interval
                 }
                 else if (!pr.Ok)
                 {
@@ -438,7 +455,7 @@ public sealed class GuardEngine : IDisposable
         {
             _lastKillAttempt = DateTimeOffset.Now;
             Log.Warn("CLAUDE_KILL_START", $"Прокси недоступен {_cfg.KillDelaySeconds} с — завершаю Claude Desktop");
-            var n = ClaudeApp.KillDesktopProcesses(_installDir);
+            var n = _installDirs.Sum(ClaudeApp.KillDesktopProcesses);
             if (n > 0)
             {
                 _killedEver = true;
@@ -465,6 +482,14 @@ public sealed class GuardEngine : IDisposable
         }
     }
 
+    private bool StaleTick()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastStaleCountTicks < _cfg.ProbeIntervalMs) return false;
+        _lastStaleCountTicks = now;
+        return true;
+    }
+
     private void ResetHealth()
     {
         _successStreak = 0;
@@ -484,24 +509,30 @@ public sealed class GuardEngine : IDisposable
         _nextSingBoxStart = now.AddSeconds(Math.Min(60, 5 << _singBoxRestarts));
 
         _singBoxGeneration++;
+        Volatile.Write(ref _endpoint, null);
         ResetHealth();
         _singBoxStartedAt = now;
         _singBoxError = "";
+        _singBox.RedactHost = _profile.Server;
+        // a new sing-box instance (new profile, crash, resume) is unverified: leave Allowed
+        if (_state == GuardState.Allowed)
+        {
+            _allowedSince = null;
+            SetState(GuardState.Checking, ReasonCodes.Checking, "Перезапуск sing-box — повторная проверка прокси", forceLog: true);
+        }
 
         try
         {
             var port = FreeLoopbackPort();
             var user = SingBoxConfig.RandomToken(6);
             var pass = SingBoxConfig.RandomToken(16);
-            Directory.CreateDirectory(_cfg.SecretsDir);
+            SecureDir.Ensure(_cfg.SecretsDir);
             var path = Path.Combine(_cfg.SecretsDir, "sing-box.json");
             File.WriteAllText(path, SingBoxConfig.Build(_cfg, _profile, port, user, pass));
 
             if (_singBox.Start(path, out var err))
             {
-                _socksPort = port;
-                _socksUser = user;
-                _socksPass = pass;
+                Volatile.Write(ref _endpoint, new ProbeEndpoint(_singBoxGeneration, port, user, pass));
                 Log.Info("SINGBOX_RESTART", $"sing-box запущен ({why})");
                 _probeNow.Set();
             }
@@ -532,7 +563,7 @@ public sealed class GuardEngine : IDisposable
         string path = null;
         try
         {
-            Directory.CreateDirectory(_cfg.SecretsDir);
+            SecureDir.Ensure(_cfg.SecretsDir);
             path = Path.Combine(_cfg.SecretsDir, $"check-{SingBoxConfig.RandomToken(4)}.json");
             File.WriteAllText(path, SingBoxConfig.Build(_cfg, profile, 1080, "check", "check"));
             var err = _singBox.Check(path);
@@ -549,12 +580,12 @@ public sealed class GuardEngine : IDisposable
     {
         if (!force && (DateTimeOffset.Now - _lastProcScan).TotalMilliseconds < 1000) return;
         _lastProcScan = DateTimeOffset.Now;
-        _claudePids = _installDir == "" ? Array.Empty<int>() : ClaudeApp.GetRunningPids(_installDir);
+        _claudePids = _installDirs.SelectMany(ClaudeApp.GetRunningPids).Distinct().ToArray();
         _claudeRunning = _claudePids.Length > 0;
 
         // Claude updated (new versioned package folder): its new executables have no
         // physical-interface block yet — rescan right away instead of waiting for the timer.
-        if (!_paused && ClaudeApp.HasUnknownPackageProcess(_installDir))
+        if (!_paused && ClaudeApp.HasUnknownPackageProcess(_installDirs))
         {
             Log.Warn("CLAUDE_NEW_PATH", "Claude запущен из нового каталога пакета — пересканирую");
             ScanPrograms(force: false);
@@ -710,11 +741,22 @@ public sealed class GuardEngine : IDisposable
     private void ScanPrograms(bool force)
     {
         _lastScan = DateTimeOffset.Now;
-        var dir = ClaudeApp.FindInstallDir(_cfg);
-        var exes = ClaudeApp.EnumerateExecutables(dir);
-        if (dir == _installDir && !force && exes.SequenceEqual(_programs)) return;
+        var dirs = ClaudeApp.FindAllInstallDirs(_cfg);
+        var exes = dirs.SelectMany(ClaudeApp.EnumerateExecutables)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var primary = ClaudeApp.FindInstallDir(_cfg);
+        // never drop a folder whose processes are still running (old version during an update)
+        if (!force && dirs.SequenceEqual(_installDirs, StringComparer.OrdinalIgnoreCase) && exes.SequenceEqual(_programs))
+        {
+            _installDir = primary;
+            return;
+        }
+        var dir = string.Join("; ", dirs);
 
-        _installDir = dir;
+        _installDir = primary;
+        _installDirs = dirs;
         _programs = exes;
         _rulesOk = false;
         Log.Info("CLAUDE_SCAN", $"Каталог: {dir}; исполняемых файлов: {exes.Count}");
@@ -737,7 +779,7 @@ public sealed class GuardEngine : IDisposable
     private void ApplyRules()
     {
         if (_programs.Count == 0) return;
-        var specs = Firewall.BuildSpecs(_programs, new[] { _probeExe }, _blockAll);
+        var specs = Firewall.BuildSpecs(_programs, new[] { _probeExe }, _blockAll, _cfg.TunAddress);
         var ok = _fw.Apply(specs, out var err);
         _rulesOk = ok;
         if (!ok)
@@ -746,7 +788,7 @@ public sealed class GuardEngine : IDisposable
             if (!_blockAll)
             {
                 _blockAll = true;
-                if (_fw.Apply(Firewall.BuildSpecs(_programs, new[] { _probeExe }, true), out var err2))
+                if (_fw.Apply(Firewall.BuildSpecs(_programs, new[] { _probeExe }, true, _cfg.TunAddress), out var err2))
                 {
                     _rulesOk = true;
                     Log.Critical("FW_FAILSAFE", "Применён аварийный блок всех интерфейсов");
@@ -766,7 +808,7 @@ public sealed class GuardEngine : IDisposable
     private void VerifyRules()
     {
         if (_programs.Count == 0) return;
-        var expected = Firewall.BuildSpecs(_programs, new[] { _probeExe }, _blockAll);
+        var expected = Firewall.BuildSpecs(_programs, new[] { _probeExe }, _blockAll, _cfg.TunAddress);
         var actual = _fw.GetOurRules();
         var exp = expected.ToDictionary(x => x.Name, StringComparer.Ordinal);
 
@@ -776,13 +818,15 @@ public sealed class GuardEngine : IDisposable
             foreach (var a in actual)
             {
                 if (!exp.TryGetValue(a.Name, out var e)) { ok = false; break; }
-                if (a.Enabled != e.Enabled || !Firewall.SameInterfaceTypes(a.InterfaceTypes, e.InterfaceTypes))
+                if (a.Enabled != e.Enabled || !Firewall.Matches(a, e))
                 {
                     ok = false;
                     break;
                 }
             }
         }
+
+        CheckSystemProxies();
 
         bool fwEnabled = _fw.IsFirewallEnabled(out var fwDetail);
         if (!fwEnabled && _firewallEnabled)
@@ -799,6 +843,24 @@ public sealed class GuardEngine : IDisposable
         }
     }
 
+    /// <summary>Another VPN client's loopback system proxy is invisible to the firewall:
+    /// keep Claude domains bypassed for every logged-on user, otherwise refuse Allowed.</summary>
+    private void CheckSystemProxies()
+    {
+        string conflict = null;
+        foreach (var (sid, st) in SystemProxy.InspectAllUsers(_cfg, fix: _cfg.ManageSystemProxyBypass))
+        {
+            if (st.Fixed) Log.Info("PROXY_BYPASS_FIXED", $"Домены Claude добавлены в исключения системного прокси ({sid})");
+            if (!st.Loopback) continue;
+            if (!string.IsNullOrWhiteSpace(st.AutoConfigUrl))
+                conflict ??= "Другой VPN включил локальный PAC-скрипт — переключите его в режим «Системный прокси» без PAC";
+            else if (st.Enabled && !st.BypassOk)
+                conflict ??= "Системный прокси другого VPN перехватывает Claude, а домены Claude не в исключениях";
+        }
+        if (conflict != _proxyConflict && conflict != null) Log.Warn("PROXY_CONFLICT", conflict);
+        _proxyConflict = conflict;
+    }
+
     // ---------------- proxy probe ----------------
 
     private void ProbeLoop()
@@ -807,15 +869,13 @@ public sealed class GuardEngine : IDisposable
         {
             try
             {
-                var gen = _singBoxGeneration;
-                var port = _socksPort;
-                var user = _socksUser;
-                var pass = _socksPass;
-                if (!_paused && port > 0 && _singBox.IsRunning)
+                var endpoint = Volatile.Read(ref _endpoint);
+                if (!_paused && endpoint != null && _singBox.IsRunning)
                 {
-                    var ep = new IPEndPoint(IPAddress.Loopback, port);
+                    var gen = endpoint.Generation;
+                    var ep = new IPEndPoint(IPAddress.Loopback, endpoint.Port);
                     var tasks = _cfg.ProbeTargets
-                        .Select(t => Task.Run(() => TunnelProbe.RunViaSocks(ep, user, pass, t, _cfg.ProbeTimeoutMs)))
+                        .Select(t => Task.Run(() => TunnelProbe.RunViaSocks(ep, endpoint.User, endpoint.Pass, t, _cfg.ProbeTimeoutMs)))
                         .ToArray();
                     try { Task.WaitAll(tasks, _cfg.ProbeTimeoutMs + 1500); } catch { }
 
@@ -906,7 +966,9 @@ public sealed class GuardEngine : IDisposable
             if (!_singBox.IsRunning) { r.Error = "sing-box не запустился: " + (_singBoxError + " " + _singBox.LastOutput).Trim(); return r; }
             if (!tun.Up || string.IsNullOrEmpty(tun.Ipv4)) { r.Error = "TUN sing-box не поднялся"; return r; }
 
-            var viaProxy = TunnelProbe.RunViaSocks(new IPEndPoint(IPAddress.Loopback, _socksPort), _socksUser, _socksPass,
+            var epNow = Volatile.Read(ref _endpoint);
+            if (epNow == null) { r.Error = "sing-box не запущен"; return r; }
+            var viaProxy = TunnelProbe.RunViaSocks(new IPEndPoint(IPAddress.Loopback, epNow.Port), epNow.User, epNow.Pass,
                 _cfg.ProbeTargets[0], _cfg.ProbeTimeoutMs);
             r.Steps.Add($"probe_via_proxy ok={viaProxy.Ok} code={viaProxy.Code} ms={viaProxy.ElapsedMs} {viaProxy.Message}");
             if (!viaProxy.Ok) { r.Error = "прокси не пропускает трафик: " + viaProxy.Message; return r; }
@@ -914,7 +976,7 @@ public sealed class GuardEngine : IDisposable
             // 3) the TUN interface must NOT fall under the physical block (Claude goes there)
             var viaTun = TunnelProbe.Run(IPAddress.Parse(tun.Ipv4), _cfg.ProbeTargets[0], _cfg.ProbeTimeoutMs);
             r.Steps.Add($"probe_via_tun ok={viaTun.Ok} code={viaTun.Code} {viaTun.Message}");
-            if (!viaTun.Ok) { r.Error = "трафик через TUN блокируется — тип интерфейса попал под физический блок?"; return r; }
+            if (!viaTun.Ok) { r.Error = "трафик через TUN блокируется — проверьте tunAddress в config.json"; return r; }
 
             r.Ok = true;
             return r;

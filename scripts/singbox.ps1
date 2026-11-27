@@ -3,9 +3,10 @@
 # The archive is cached in .cache\ so repeated builds work offline.
 param(
     [Parameter(Mandatory = $true)][string]$Destination,
-    [string]$Version = '1.12.0',
-    # Optional SHA256 of the zip; fill it in to pin the exact binary.
-    [string]$Sha256 = ''
+    [string]$Version = '1.12.25',
+    # SHA256 of sing-box-<Version>-windows-amd64.zip (GitHub release asset digest).
+    # Must be updated together with -Version; a download without a matching hash is rejected.
+    [string]$Sha256 = '492df6eb97c4c749d45350d792ecece71278d83c4979149ba6a142765b8fc1d4'
 )
 $ErrorActionPreference = 'Stop'
 
@@ -24,12 +25,11 @@ if (-not (Test-Path $zip)) {
     Move-Item "$zip.part" $zip -Force
 }
 
-if ($Sha256) {
-    $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
-    if ($actual -ne $Sha256.ToUpperInvariant()) {
-        Remove-Item $zip -Force
-        throw "SHA256 sing-box не совпадает: $actual"
-    }
+if (-not $Sha256) { throw "Не задан SHA256 для sing-box $Version" }
+$actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+if ($actual -ne $Sha256.ToUpperInvariant()) {
+    Remove-Item $zip -Force
+    throw "SHA256 sing-box не совпадает: $actual"
 }
 
 $extract = Join-Path $cache $name

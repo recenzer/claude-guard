@@ -253,7 +253,7 @@ internal static class Program
             {
                 using var fw = new Firewall();
                 var exe = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "ClaudeGuard.Service.exe");
-                var specs = Firewall.BuildSpecs(exes, new[] { exe }, blockAll: true);
+                var specs = Firewall.BuildSpecs(exes, new[] { exe }, blockAll: true, cfg.TunAddress);
                 if (fw.Apply(specs, out var err)) Log.Critical("WATCHDOG_BLOCKED", "Аварийная блокировка применена");
                 else Log.Critical("WATCHDOG_BLOCK_FAILED", err);
             }

@@ -6,7 +6,8 @@ Claude Desktop ходит в интернет **только через ваш �
 
 - Служба запускает `sing-box.exe` с TUN-адаптером `ClaudeGuard`. Правило маршрутизации по пути процесса: всё из пакета Claude Desktop (`WindowsApps\Claude_*__pzs8sxrjxfjjc\`) → прокси, остальное → напрямую.
 - DNS-запросы к доменам Claude (`anthropic.com`, `claude.ai`, `claude.com`, `claudeusercontent.com`) разрешаются через прокси — провайдер их не видит.
-- Для всех `.exe` Claude Desktop создаются правила Windows Firewall: на физических интерфейсах (LAN, Wi-Fi) Claude заблокирован **всегда**. Выйти он может только через TUN sing-box.
+- Для всех `.exe` Claude Desktop создаются правила Windows Firewall: Claude заблокирован на **любом локальном адресе, кроме адреса TUN sing-box** (и loopback). Это покрывает LAN, Wi-Fi, адаптеры других VPN и весь IPv6.
+- Трафик к доменам Claude от любого процесса (в том числе встроенный Claude Code, помощники вне пакета) sing-box тоже отправляет в прокси.
 - Каждые 2 с служба проверяет прокси: TLS-рукопожатие к `api.anthropic.com` через локальный SOCKS sing-box (с одноразовым паролем). Один сбой не блокирует Claude, нужна серия из 3 результатов.
 - Если sing-box упал, TUN пропал или прокси не отвечает — блок на всех интерфейсах, через 5 с Claude закрывается. sing-box перезапускается автоматически (с нарастающей паузой при повторных падениях).
 - После обновления Claude (новый каталог пакета) правила firewall пересоздаются сразу, как только запустится новая версия.
@@ -28,7 +29,7 @@ Claude Desktop ходит в интернет **только через ваш �
 
 1. В Happ включите режим **«Системный прокси»**, **TUN-режим выключите**. Два TUN мешают друг другу — Claude Guard заблокирует Claude с причиной `ROUTE_NOT_VIA_TUN`.
 2. PAC-режим тоже выключите.
-3. Claude Guard сам добавляет домены Claude в исключения системного прокси и возвращает их, если VPN-клиент их сотрёт (`manageSystemProxyBypass`). Иначе Claude ушёл бы в прокси Happ, а не в Claude Guard.
+3. Claude Guard (служба) сам добавляет домены Claude в исключения системного прокси для всех вошедших пользователей и возвращает их, если VPN-клиент их сотрёт (`manageSystemProxyBypass`). Если исключения не держатся или включён локальный PAC — Claude блокируется с причиной `SYSTEM_PROXY_CONFLICT`.
 
 ## Установка
 
@@ -104,7 +105,7 @@ Windows SmartScreen или антивирус могут предупредит�
 
 ## Сборка из исходников
 
-Нужен [.NET SDK 10](https://dotnet.microsoft.com/download). sing-box (версия закреплена в `scripts\singbox.ps1`) скачивается с GitHub при сборке и кешируется в `.cache\`.
+Нужен [.NET SDK 10](https://dotnet.microsoft.com/download). sing-box (версия и SHA256 закреплены в `scripts\singbox.ps1`) скачивается с GitHub при сборке и кешируется в `.cache\`.
 
 ```powershell
 scripts\build.ps1      # разработческая сборка в dist\

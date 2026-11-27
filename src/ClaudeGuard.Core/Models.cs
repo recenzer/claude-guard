@@ -54,6 +54,7 @@ public static class ReasonCodes
     public const string SingBoxMissing = "SINGBOX_MISSING";
     public const string SingBoxDown = "SINGBOX_DOWN";
     public const string SingBoxConfigError = "SINGBOX_CONFIG_ERROR";
+    public const string SystemProxyConflict = "SYSTEM_PROXY_CONFLICT";
     public const string TunMissing = "TUN_INTERFACE_MISSING";
     public const string TunDown = "TUN_INTERFACE_DOWN";
     public const string TunNoIp = "TUN_NO_IPV4";

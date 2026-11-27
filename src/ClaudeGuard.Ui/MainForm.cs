@@ -981,12 +981,11 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Повторяет команду отдельным процессом с правами администратора (UAC).</summary>
-    private async Task RunElevatedAsync(string cmd, string argFile = null, int waitMs = 20000)
+    private async Task RunElevatedAsync(string cmd, int waitMs = 20000)
     {
         try
         {
-            var args = "--" + cmd + (argFile == null ? "" : $" \"{argFile}\"");
-            var psi = new ProcessStartInfo(Environment.ProcessPath!, args)
+            var psi = new ProcessStartInfo(Environment.ProcessPath!, "--" + cmd)
             {
                 UseShellExecute = true,
                 Verb = "runas"
@@ -1003,61 +1002,17 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Import a share link / Xray / sing-box config. Changing the profile needs
-    /// administrator rights, so the text goes to an elevated helper through a temp file
-    /// (not the command line, which other processes can read).</summary>
+    /// administrator rights, so the input is collected inside the elevated helper itself
+    /// (no temp files or command-line arguments another process could read or swap).</summary>
     private async Task ImportProfileAsync()
     {
-        string text;
-        using (var dlg = new ProfileDialog())
-        {
-            if (dlg.ShowDialog(this) != DialogResult.OK) return;
-            text = dlg.ProfileText;
-        }
-        if (string.IsNullOrWhiteSpace(text)) return;
-
-        // syntax check locally first: quick feedback without UAC
-        try { ProfileParser.Parse(text); }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, "Не удалось разобрать профиль:\n" + ex.Message, "Claude Guard",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
         _importBtn.Enabled = false;
-        string tmp = null;
         try
         {
-            var resp = await CallAsync("set-profile", 60000, payload: text);
-            if (resp != null && !resp.Ok && resp.Error != null && resp.Error.Contains("ELEVATION_REQUIRED"))
-            {
-                tmp = Path.Combine(Path.GetTempPath(), $"claudeguard-{Guid.NewGuid():N}.txt");
-                File.WriteAllText(tmp, text);
-                await RunElevatedAsync("set-profile", tmp, 90000);
-                var resultFile = tmp + ".result";
-                if (File.Exists(resultFile))
-                {
-                    var result = File.ReadAllText(resultFile);
-                    try { File.Delete(resultFile); } catch { }
-                    if (result.StartsWith("OK", StringComparison.Ordinal))
-                        MessageBox.Show(this, "Профиль применён:\n" + result[2..].Trim(), "Claude Guard",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    else
-                        MessageBox.Show(this, "Профиль не применён:\n" + result, "Claude Guard",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-            else if (resp == null)
-                MessageBox.Show(this, "Служба Claude Guard недоступна.", "Claude Guard", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else if (!resp.Ok)
-                MessageBox.Show(this, "Профиль не применён:\n" + resp.Error, "Claude Guard", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            else
-                MessageBox.Show(this, "Профиль применён:\n" + resp.Profile?.Summary, "Claude Guard",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            await RunElevatedAsync("import-profile", waitMs: 15 * 60 * 1000);
         }
         finally
         {
-            if (tmp != null) { try { File.Delete(tmp); } catch { } }
             _importBtn.Enabled = true;
             await RefreshStatusAsync();
         }

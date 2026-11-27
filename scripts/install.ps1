@@ -178,11 +178,11 @@ Write-Ok "Файлы скопированы в $InstallDir"
 Write-Step "Настройка ACL"
 # SYSTEM и Administrators — полный доступ; Users — только чтение.
 # Это не позволяет обычному пользователю подменить exe, который служба запускает от SYSTEM.
-& icacls.exe $InstallDir /inheritance:r `
-    /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-& icacls.exe $DataDir /inheritance:r `
-    /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "icacls завершился с ошибкой." }
+foreach ($d in @($InstallDir, $DataDir)) {
+    & icacls.exe $d /inheritance:r `
+        /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls завершился с ошибкой: $d" }
+}
 # Profile and generated sing-box config contain proxy credentials: SYSTEM/Administrators only.
 $secretsDir = Join-Path $DataDir 'secrets'
 New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
@@ -243,7 +243,10 @@ try {
 
 if (-not $NoUiAutostart) {
     Write-Step "Создание задачи автозапуска UI"
-    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    # The tray UI must run for the person sitting at the console, not for the admin account
+    # that approved UAC (over-the-shoulder elevation).
+    $user = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if (-not $user) { $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
     $uiAction = New-ScheduledTaskAction -Execute $uiExe -Argument '--minimized' -WorkingDirectory $InstallDir
     $uiTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $uiSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
