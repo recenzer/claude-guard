@@ -84,6 +84,18 @@ if ($KeepRules) {
     Write-Host "    правила удалены" -ForegroundColor DarkGray
 }
 
+Write-Step "Удаление исключений системного прокси"
+# Claude Guard added Claude domains to ProxyOverride of every logged-on user; remove only our entries.
+$ours = @('anthropic.com','claude.ai','claude.com','claudeusercontent.com') | ForEach-Object { $_; "*.$_" }
+foreach ($sid in (Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'S-1-5-21-*' -and $_.PSChildName -notlike '*_Classes' })) {
+    $key = "Registry::HKEY_USERS\$($sid.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try {
+        $cur = (Get-ItemProperty -Path $key -Name ProxyOverride -ErrorAction Stop).ProxyOverride
+        $kept = ($cur -split ';' | Where-Object { $_ -and ($ours -notcontains $_.Trim()) }) -join ';'
+        if ($kept -ne $cur) { Set-ItemProperty -Path $key -Name ProxyOverride -Value $kept }
+    } catch { }
+}
+
 Write-Step "Удаление ярлыка"
 if (Test-Path $ShortcutPath) {
     Remove-Item $ShortcutPath -Force

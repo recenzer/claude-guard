@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Security.Principal;
 using System.Text.Json;
 using ClaudeGuard.Core;
@@ -129,6 +129,17 @@ internal static class Program
             case "selftest":
                 if (!elevated) return new GuardResponse { Ok = false, Error = "ELEVATION_REQUIRED" };
                 return new GuardResponse { Ok = true, SelfTest = engine.RunSelfTest() };
+            case "set-profile":
+            {
+                // the profile decides where Claude traffic goes: only an administrator may change it
+                if (!elevated) return new GuardResponse { Ok = false, Error = "ELEVATION_REQUIRED" };
+                var r = engine.SetProfile(req.Payload ?? "");
+                return new GuardResponse { Ok = r.Ok, Error = r.Error, Profile = r, Status = engine.GetStatus() };
+            }
+            case "clear-profile":
+                if (!elevated) return new GuardResponse { Ok = false, Error = "ELEVATION_REQUIRED" };
+                engine.ClearProfile();
+                return new GuardResponse { Ok = true, Status = engine.GetStatus() };
             default:
                 return new GuardResponse { Ok = false, Error = "UNKNOWN_CMD: " + cmd };
         }
@@ -151,8 +162,8 @@ internal static class Program
         using var engine = new GuardEngine(cfg, exe);
         engine.Start();
 
-        // ждём сканирования Claude
-        for (int i = 0; i < 50 && !engine.IsReady; i++) Thread.Sleep(100);
+        // wait for the Claude scan and the sing-box start
+        for (int i = 0; i < 150 && !engine.IsReady; i++) Thread.Sleep(100);
 
         var result = engine.RunSelfTest();
         Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
@@ -169,6 +180,17 @@ internal static class Program
         using var fw = new Firewall();
         fw.RemoveAll();
         Log.Warn("RULES_REMOVED", "Все правила Claude Guard удалены");
+        // a sing-box left without the service would keep the TUN adapter
+        foreach (var p in Process.GetProcessesByName("sing-box"))
+        {
+            try
+            {
+                if (string.Equals(p.MainModule?.FileName, cfg.ResolvedSingBoxPath, StringComparison.OrdinalIgnoreCase))
+                    p.Kill(entireProcessTree: true);
+            }
+            catch { }
+            finally { p.Dispose(); }
+        }
         return 0;
     }
 
@@ -231,7 +253,7 @@ internal static class Program
             {
                 using var fw = new Firewall();
                 var exe = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "ClaudeGuard.Service.exe");
-                var specs = Firewall.BuildSpecs(exes, new[] { exe }, blockAll: true);
+                var specs = Firewall.BuildSpecs(exes, new[] { exe }, blockAll: true, cfg.TunAddress);
                 if (fw.Apply(specs, out var err)) Log.Critical("WATCHDOG_BLOCKED", "Аварийная блокировка применена");
                 else Log.Critical("WATCHDOG_BLOCK_FAILED", err);
             }

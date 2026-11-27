@@ -22,6 +22,13 @@ internal static class Program
             Environment.Exit(Elevated("resume"));
             return;
         }
+        // elevated helper: the profile is typed/pasted here, inside the elevated process
+        if (args.Any(a => a.Equals("--import-profile", StringComparison.OrdinalIgnoreCase)))
+        {
+            ApplicationConfiguration.Initialize();
+            Environment.Exit(ImportProfileElevated());
+            return;
+        }
 
         using var mutex = new Mutex(true, MutexName, out bool created);
         if (!created)
@@ -47,6 +54,39 @@ internal static class Program
 
         Application.Run(form);
         GC.KeepAlive(mutex);
+    }
+
+    private static int ImportProfileElevated()
+    {
+        while (true)
+        {
+            string text;
+            using (var dlg = new ProfileDialog())
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return 1;
+                text = dlg.ProfileText;
+            }
+            if (string.IsNullOrWhiteSpace(text)) return 1;
+
+            string error;
+            try
+            {
+                ProfileParser.Parse(text); // quick local check
+                var r = Ipc.Call(new GuardRequest { Cmd = "set-profile", Payload = text }, 90000);
+                if (r.Ok)
+                {
+                    MessageBox.Show("Профиль применён:\n" + r.Profile?.Summary, "Claude Guard",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 0;
+                }
+                error = r.Error;
+            }
+            catch (Exception ex) { error = ex.Message; }
+
+            if (MessageBox.Show("Профиль не применён:\n" + error + "\n\nПопробовать другой?", "Claude Guard",
+                    MessageBoxButtons.RetryCancel, MessageBoxIcon.Error) != DialogResult.Retry)
+                return 1;
+        }
     }
 
     private static int Elevated(string cmd)

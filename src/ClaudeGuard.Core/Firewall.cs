@@ -12,9 +12,13 @@ public sealed class FirewallRuleSpec
     public string Program = "";          // полный путь; пусто = правило для пакета
     public string Package = "";          // PackageFamilyName (не используется по умолчанию)
     public string InterfaceTypes = "";   // "LAN,Wireless,RemoteAccess" или "" = все интерфейсы
+    public string LocalAddresses = "";   // "" = any
     public bool Enabled = true;
 
-    public string ConditionKey => $"{Program}|{Package}|{InterfaceTypes}";
+    /// <summary>Stored in the rule description: Windows may rewrite address lists in its own
+    /// notation, so we compare this tag instead of the raw condition strings.</summary>
+    public string SpecTag => "spec=" + Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(
+        System.Text.Encoding.UTF8.GetBytes($"{Program.ToLowerInvariant()}|{Package}|{InterfaceTypes}|{LocalAddresses}|block-out")))[..12];
 }
 
 public sealed class ExistingRule
@@ -22,6 +26,7 @@ public sealed class ExistingRule
     public string Name = "";
     public string Program = "";
     public string InterfaceTypes = "";
+    public string Description = "";
     public int Action;
     public bool Enabled;
 }
@@ -51,12 +56,45 @@ public sealed class Firewall : IDisposable
         _rules = _policy.Rules;
     }
 
-    public static string PhysicalInterfaceTypes => "LAN,Wireless,RemoteAccess";
-
-    /// <summary>Полный набор правил: для каждой программы — блок на физических интерфейсах (всегда)
-    /// и (опционально) блок на всех интерфейсах. Пробная программа блокируется только на физических.</summary>
-    public static List<FirewallRuleSpec> BuildSpecs(IEnumerable<string> programs, IEnumerable<string> probePrograms, bool blockAll)
+    /// <summary>
+    /// "Not via our TUN" as an address condition: every local address except loopback and the TUN IP.
+    /// Unlike interface types (LAN/Wireless/RemoteAccess) this also covers other VPN adapters,
+    /// tunnel interfaces, WWAN and all of IPv6 (our TUN is IPv4-only).
+    /// </summary>
+    public static string NonTunLocalAddresses(string tunAddressCidr)
     {
+        var ipText = (tunAddressCidr ?? "").Split('/')[0].Trim();
+        uint tun = System.Net.IPAddress.TryParse(ipText, out var ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? ToUInt(ip) : 0;
+        var excluded = new List<(uint lo, uint hi)> { (0x7F000000u, 0x7FFFFFFFu) };
+        if (tun != 0) excluded.Add((tun, tun));
+        excluded.Sort();
+
+        var parts = new List<string>();
+        ulong start = 0;
+        foreach (var (lo, hi) in excluded)
+        {
+            if (lo > start) parts.Add($"{FromUInt((uint)start)}-{FromUInt(lo - 1)}");
+            start = Math.Max(start, (ulong)hi + 1);
+        }
+        if (start <= uint.MaxValue) parts.Add($"{FromUInt((uint)start)}-255.255.255.255");
+        parts.Add("::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"); // all IPv6 except :: and ::1
+        return string.Join(",", parts);
+    }
+
+    private static uint ToUInt(System.Net.IPAddress ip)
+    {
+        var b = ip.GetAddressBytes();
+        return ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
+    }
+
+    private static string FromUInt(uint v) => $"{v >> 24}.{(v >> 16) & 255}.{(v >> 8) & 255}.{v & 255}";
+
+    /// <summary>Rule set: per program a block for every local address except the TUN (always on)
+    /// and an optional block on everything. The probe program gets only the non-TUN block.</summary>
+    public static List<FirewallRuleSpec> BuildSpecs(IEnumerable<string> programs, IEnumerable<string> probePrograms, bool blockAll, string tunAddressCidr)
+    {
+        var nonTun = NonTunLocalAddresses(tunAddressCidr);
         var list = new List<FirewallRuleSpec>();
         foreach (var p in programs.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -64,7 +102,7 @@ public sealed class Firewall : IDisposable
             {
                 Name = MakeName("Phys", p),
                 Program = p,
-                InterfaceTypes = PhysicalInterfaceTypes,
+                LocalAddresses = nonTun,
                 Enabled = true
             });
             list.Add(new FirewallRuleSpec
@@ -82,12 +120,26 @@ public sealed class Firewall : IDisposable
             {
                 Name = MakeName("Probe", p),
                 Program = p,
-                InterfaceTypes = PhysicalInterfaceTypes,
+                LocalAddresses = nonTun,
                 Enabled = true
             });
         }
         return list;
     }
+
+    /// <summary>Compares interface type lists ignoring order and case ("" and "All" mean all interfaces).</summary>
+    public static bool SameInterfaceTypes(string a, string b)
+    {
+        static string[] Norm(string s) => string.IsNullOrWhiteSpace(s)
+            ? new[] { "all" }
+            : s.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(x => x.ToLowerInvariant()).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        return Norm(a).SequenceEqual(Norm(b));
+    }
+
+    /// <summary>Same conditions as the spec (via the tag in the description).</summary>
+    public static bool Matches(ExistingRule rule, FirewallRuleSpec spec)
+        => rule.Description.EndsWith("[" + spec.SpecTag + "]", StringComparison.Ordinal);
 
     public static string MakeName(string kind, string program)
     {
@@ -111,6 +163,7 @@ public sealed class Firewall : IDisposable
                 var er = new ExistingRule { Name = name };
                 try { er.Program = (string)r.ApplicationName ?? ""; } catch { }
                 try { er.InterfaceTypes = (string)r.InterfaceTypes ?? ""; } catch { }
+                try { er.Description = (string)r.Description ?? ""; } catch { }
                 try { er.Action = (int)r.Action; } catch { }
                 try { er.Enabled = (bool)r.Enabled; } catch { }
                 result.Add(er);
@@ -127,8 +180,22 @@ public sealed class Firewall : IDisposable
         {
             try
             {
-                var existing = GetOurRules().ToDictionary(x => x.Name, StringComparer.Ordinal);
+                var all = GetOurRules();
                 var desiredNames = new HashSet<string>(desired.Select(d => d.Name), StringComparer.Ordinal);
+
+                // Windows allows several rules with one name (e.g. after `netsh advfirewall import`).
+                // Remove every copy of a duplicated name and recreate it below; otherwise
+                // ToDictionary would throw and the rules could never be applied again.
+                foreach (var g in all.GroupBy(x => x.Name, StringComparer.Ordinal).Where(g => g.Count() > 1))
+                {
+                    for (int i = 0; i < g.Count(); i++)
+                    {
+                        try { _rules.Remove(g.Key); } catch { }
+                    }
+                }
+                var existing = GetOurRules()
+                    .GroupBy(x => x.Name, StringComparer.Ordinal)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
                 foreach (var old in existing.Values)
                 {
@@ -142,10 +209,8 @@ public sealed class Firewall : IDisposable
                 {
                     if (existing.TryGetValue(d.Name, out var cur))
                     {
-                        var ifTypes = string.IsNullOrEmpty(d.InterfaceTypes) ? "All" : d.InterfaceTypes;
-                        var curIf = string.IsNullOrEmpty(cur.InterfaceTypes) ? "All" : cur.InterfaceTypes;
                         bool same = string.Equals(cur.Program, d.Program, StringComparison.OrdinalIgnoreCase)
-                                    && string.Equals(curIf, ifTypes, StringComparison.OrdinalIgnoreCase)
+                                    && Matches(cur, d)
                                     && cur.Action == ActionBlock;
                         if (!same)
                         {
@@ -217,7 +282,7 @@ public sealed class Firewall : IDisposable
             ?? throw new InvalidOperationException("HNetCfg.FwRule недоступен");
         dynamic rule = Activator.CreateInstance(ruleType)!;
         rule.Name = d.Name;
-        rule.Description = "Claude Guard: блокировка сетевого доступа Claude Desktop вне VPN";
+        rule.Description = $"Claude Guard: Claude Desktop только через свой туннель [{d.SpecTag}]";
         rule.Grouping = Grouping;
         rule.Direction = DirOut;
         rule.Action = ActionBlock;
@@ -225,6 +290,7 @@ public sealed class Firewall : IDisposable
         rule.Enabled = d.Enabled;
         if (!string.IsNullOrEmpty(d.Program)) rule.ApplicationName = d.Program;
         if (!string.IsNullOrEmpty(d.InterfaceTypes)) rule.InterfaceTypes = d.InterfaceTypes;
+        if (!string.IsNullOrEmpty(d.LocalAddresses)) rule.LocalAddresses = d.LocalAddresses;
         if (!string.IsNullOrEmpty(d.Package)) rule.LocalAppPackageId = d.Package;
         try
         {

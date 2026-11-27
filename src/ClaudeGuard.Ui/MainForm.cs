@@ -226,7 +226,7 @@ public sealed class MainForm : Form
     private readonly HeroCard _hero = new();
     private readonly Label _heroTitle = new();
     private readonly Label _heroSub = new();
-    private readonly Tile _vpnTile = new("VPN (Happ + туннель)");
+    private readonly Tile _vpnTile = new("Прокси (sing-box)");
     private readonly Tile _protTile = new("Защита Claude");
     private readonly Tile _netTile = new("Сеть через туннель");
     private readonly Card _reasonCard = new();
@@ -235,6 +235,9 @@ public sealed class MainForm : Form
     private readonly Button _pauseBtn = new();
     private readonly Button _checkBtn = new();
     private readonly Button _launchBtn = new();
+    private readonly Card _profileCard = new();
+    private readonly Label _profileText = new();
+    private readonly Button _importBtn = new();
     private readonly Label _serviceInfo = new();
     private readonly BufferedListView _logView = new();
     private readonly NotifyIcon _tray = new();
@@ -348,12 +351,12 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             BackColor = Theme.Bg,
             Padding = new Padding(20, 16, 20, 16)
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (int i = 0; i < 5; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int i = 0; i < 6; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
@@ -375,12 +378,25 @@ public sealed class MainForm : Form
         };
         var subtitle = new Label
         {
-            Text = "Защита Claude Desktop от утечки трафика при сбое VPN",
+            Text = "Claude Desktop ходит в сеть только через свой прокси (sing-box)",
             Font = Theme.Small,
             ForeColor = Theme.Muted,
             AutoSize = true,
             Location = new Point(2, 34)
         };
+        var guide = new LinkLabel
+        {
+            Text = "Гайд: вместе с Happ / другим VPN",
+            Font = Theme.Small,
+            LinkColor = Theme.Blue,
+            ActiveLinkColor = Theme.Blue,
+            AutoSize = true,
+            BackColor = Color.Transparent,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        guide.LinkClicked += (_, _) => { using var g = new GuideDialog(SystemProxy.Inspect(_cfg, fix: false)); g.ShowDialog(this); };
+        header.Resize += (_, _) => guide.Location = new Point(header.Width - guide.Width - 2, 36);
+        header.Controls.Add(guide);
         header.Controls.Add(_serviceInfo);
         header.Controls.Add(title);
         header.Controls.Add(subtitle);
@@ -447,6 +463,27 @@ public sealed class MainForm : Form
         _reasonCard.Controls.Add(_reasonCode);
         root.Controls.Add(_reasonCard, 0, 3);
 
+        // --- профиль прокси ---
+        _profileCard.Dock = DockStyle.Fill;
+        _profileCard.Height = 56;
+        _profileCard.Margin = new Padding(0, 0, 0, 10);
+        _profileCard.Padding = new Padding(18, 10, 12, 10);
+        _profileText.Dock = DockStyle.Fill;
+        _profileText.Font = Theme.Body;
+        _profileText.ForeColor = Theme.Muted;
+        _profileText.BackColor = Color.Transparent;
+        _profileText.TextAlign = ContentAlignment.MiddleLeft;
+        _profileText.AutoEllipsis = true;
+        _profileText.Text = "Профиль: —";
+        StyleButton(_importBtn, "Импорт профиля…", Theme.Ghost, Theme.Blue, Theme.GhostHover);
+        _importBtn.Dock = DockStyle.Right;
+        _importBtn.Width = 170;
+        _importBtn.Margin = Padding.Empty;
+        _importBtn.Click += async (_, _) => await ImportProfileAsync();
+        _profileCard.Controls.Add(_profileText);
+        _profileCard.Controls.Add(_importBtn);
+        root.Controls.Add(_profileCard, 0, 4);
+
         // --- кнопки ---
         var buttons = new TableLayoutPanel
         {
@@ -482,7 +519,7 @@ public sealed class MainForm : Form
         buttons.Controls.Add(_pauseBtn, 0, 0);
         buttons.Controls.Add(_checkBtn, 1, 0);
         buttons.Controls.Add(_launchBtn, 2, 0);
-        root.Controls.Add(buttons, 0, 4);
+        root.Controls.Add(buttons, 0, 5);
 
         // --- журнал ---
         var logCard = new Card { Dock = DockStyle.Fill, Padding = new Padding(14, 10, 14, 12), Margin = Padding.Empty };
@@ -527,7 +564,7 @@ public sealed class MainForm : Form
         _logView.Resize += (_, _) => FitLogColumns();
         logCard.Controls.Add(_logView);
         logCard.Controls.Add(logHeader);
-        root.Controls.Add(logCard, 0, 5);
+        root.Controls.Add(logCard, 0, 6);
     }
 
     private void FitLogColumns()
@@ -583,6 +620,8 @@ public sealed class MainForm : Form
         menu.Items.Add("Открыть окно", null, (_, _) => RestoreWindow());
         menu.Items.Add("Проверить сейчас", null, async (_, _) => await CallAsync("check", 3000));
         menu.Items.Add("Запустить Claude", null, (_, _) => ClaudeApp.Launch(_cfg));
+        menu.Items.Add("Импорт профиля…", null, async (_, _) => { RestoreWindow(); await ImportProfileAsync(); });
+        menu.Items.Add("Гайд: вместе с Happ", null, (_, _) => { RestoreWindow(); using var g = new GuideDialog(SystemProxy.Inspect(_cfg, fix: false)); g.ShowDialog(this); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Выход из интерфейса", null, (_, _) =>
         {
@@ -636,9 +675,9 @@ public sealed class MainForm : Form
 
     // ---------------- обмен со службой ----------------
 
-    private static async Task<GuardResponse> CallAsync(string cmd, int timeoutMs, int count = 0)
+    private static async Task<GuardResponse> CallAsync(string cmd, int timeoutMs, int count = 0, string payload = "")
     {
-        var task = Task.Run(() => Ipc.Call(new GuardRequest { Cmd = cmd, Count = count > 0 ? count : 200 }, timeoutMs));
+        var task = Task.Run(() => Ipc.Call(new GuardRequest { Cmd = cmd, Count = count > 0 ? count : 200, Payload = payload ?? "" }, timeoutMs));
         // исключение из «брошенной» задачи не должно оставаться необработанным
         _ = task.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
@@ -647,6 +686,38 @@ public sealed class MainForm : Form
         try { return await task; }
         catch { return null; }
     }
+
+    /// <summary>Every 5 s: keep Claude domains in the system proxy bypass list
+    /// (a VPN client in "system proxy" mode may overwrite it on every connect).</summary>
+    private void CheckSystemProxy()
+    {
+        if (!_cfg.ManageSystemProxyBypass) return;
+        if ((DateTimeOffset.Now - _lastProxyCheck).TotalSeconds < 5) return;
+        _lastProxyCheck = DateTimeOffset.Now;
+        if (_status?.Protection == ProtectionState.Disabled) return;
+
+        var st = SystemProxy.Inspect(_cfg, fix: true);
+        if (st.Fixed && !_proxyFixShown)
+        {
+            _proxyFixShown = true;
+            _tray.ShowBalloonTip(4000, "Claude Guard",
+                "Включён системный прокси другого VPN — домены Claude добавлены в исключения, Claude идёт через Claude Guard.",
+                ToolTipIcon.Info);
+        }
+        var pac = !string.IsNullOrWhiteSpace(st.AutoConfigUrl);
+        if (pac && !_pacWarnShown)
+        {
+            _pacWarnShown = true;
+            _tray.ShowBalloonTip(6000, "Claude Guard",
+                "Включён PAC-скрипт прокси — исключения для Claude в нём не настроить. Откройте «Гайд» в окне Claude Guard.",
+                ToolTipIcon.Warning);
+        }
+        if (!pac) _pacWarnShown = false;
+    }
+
+    private DateTimeOffset _lastProxyCheck = DateTimeOffset.MinValue;
+    private bool _proxyFixShown;
+    private bool _pacWarnShown;
 
     private async Task RefreshStatusAsync()
     {
@@ -664,6 +735,7 @@ public sealed class MainForm : Form
 
             _status = resp.Status;
             ApplyStatus(_status);
+            CheckSystemProxy();
 
             if (_status.RestartPending && !_restartHandled)
             {
@@ -728,6 +800,7 @@ public sealed class MainForm : Form
 
         _vpnTile.Set("Неизвестно", Theme.Muted, "");
         _protTile.Set("Неизвестно", Theme.Muted, "");
+        _importBtn.Enabled = false;
         _netTile.Set("Неизвестно", Theme.Muted, "");
         _reasonText.Text = "Причина: служба недоступна";
         _reasonCode.Text = "SERVICE_UNAVAILABLE";
@@ -762,18 +835,22 @@ public sealed class MainForm : Form
         {
             case GuardState.Allowed:
                 c = Theme.Green; title = "Защищено"; glyph = "✓";
-                sub = "Claude работает только через VPN";
+                sub = "Claude работает только через прокси, остальной ПК — напрямую";
+                break;
+            case GuardState.Blocked when !s.HasProfile:
+                c = Theme.Amber; title = "Нужен профиль прокси"; glyph = "!";
+                sub = "Импортируйте ссылку или конфиг — до этого Claude заблокирован";
                 break;
             case GuardState.Blocked when s.Vpn == VpnState.Down:
-                c = Theme.Red; title = "VPN отключён"; glyph = "✕";
-                sub = "Claude заблокирован системным firewall";
+                c = Theme.Red; title = "Прокси не работает"; glyph = "✕";
+                sub = "sing-box или туннель недоступны — Claude заблокирован";
                 break;
             case GuardState.Blocked:
                 c = Theme.Amber; title = "Доступ заблокирован"; glyph = "!";
                 sub = "Проверка туннеля не пройдена — Claude заблокирован";
                 break;
             case GuardState.Checking:
-                c = Theme.Blue; title = "Проверка VPN"; glyph = "…";
+                c = Theme.Blue; title = "Проверка прокси"; glyph = "…";
                 sub = "Claude заблокирован до успешной проверки";
                 break;
             case GuardState.Paused:
@@ -791,17 +868,21 @@ public sealed class MainForm : Form
         }
         SetHero(title, sub, c, glyph, danger);
 
-        // VPN
-        var processes = s.Processes != null && s.Processes.Length > 0
-            ? string.Join(" · ", s.Processes)
-            : "процессы VPN не найдены";
-        switch (s.Vpn)
+        // Прокси
+        var sb = s.SingBoxRunning ? $"sing-box pid {s.SingBoxPid}" : "sing-box не запущен";
+        if (!s.HasProfile) _vpnTile.Set("Нет профиля", Theme.Amber, sb);
+        else switch (s.Vpn)
         {
-            case VpnState.Connected: _vpnTile.Set("Подключён", Theme.Green, processes); break;
-            case VpnState.Down: _vpnTile.Set("Отключён", Theme.Red, processes); break;
-            case VpnState.Checking: _vpnTile.Set("Проверяется", Theme.Blue, processes); break;
-            default: _vpnTile.Set("Неизвестно", Theme.Amber, processes); break;
+            case VpnState.Connected: _vpnTile.Set("Работает", Theme.Green, sb); break;
+            case VpnState.Down: _vpnTile.Set("Не работает", Theme.Red, sb); break;
+            case VpnState.Checking: _vpnTile.Set("Проверяется", Theme.Blue, sb); break;
+            default: _vpnTile.Set("Неизвестно", Theme.Amber, sb); break;
         }
+
+        // Профиль
+        _profileText.Text = s.HasProfile ? "Профиль: " + s.ProfileSummary : "Профиль: не задан";
+        _profileText.ForeColor = s.HasProfile ? Theme.Text : Theme.Amber;
+        _importBtn.Enabled = true;
 
         // Защита
         var fwDetail = s.RulesOk
@@ -816,7 +897,7 @@ public sealed class MainForm : Form
 
         // Сеть
         var netDetail = $"tun: {s.TunAlias} {s.TunIp}".TrimEnd() +
-                        (string.IsNullOrEmpty(s.PhysicalIp) ? "" : $" · напрямую: {s.PhysicalIp}");
+                        (string.IsNullOrEmpty(s.PhysicalIp) ? "" : $" · ПК напрямую: {s.PhysicalIp}");
         switch (s.Network)
         {
             case NetworkState.TunOk: _netTile.Set("Туннель работает", Theme.Green, netDetail); break;
@@ -864,7 +945,7 @@ public sealed class MainForm : Form
         {
             var answer = MessageBox.Show(this,
                 "Отключить защиту?\n\nClaude Desktop получит возможность выходить в интернет напрямую, " +
-                "в обход VPN. Правила firewall будут удалены.\n\nВключить защиту обратно можно этой же кнопкой.",
+                "в обход прокси (sing-box будет остановлен). Правила firewall будут удалены.\n\nВключить защиту обратно можно этой же кнопкой.",
                 "Claude Guard — подтверждение",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.Yes) return;
@@ -900,7 +981,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Повторяет команду отдельным процессом с правами администратора (UAC).</summary>
-    private async Task RunElevatedAsync(string cmd)
+    private async Task RunElevatedAsync(string cmd, int waitMs = 20000)
     {
         try
         {
@@ -911,12 +992,29 @@ public sealed class MainForm : Form
             };
             using var p = Process.Start(psi);
             if (p != null)
-                await Task.WhenAny(p.WaitForExitAsync(), Task.Delay(20000));
+                await Task.WhenAny(p.WaitForExitAsync(), Task.Delay(waitMs));
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, "Для этого действия нужны права администратора.\n" + ex.Message,
                 "Claude Guard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>Import a share link / Xray / sing-box config. Changing the profile needs
+    /// administrator rights, so the input is collected inside the elevated helper itself
+    /// (no temp files or command-line arguments another process could read or swap).</summary>
+    private async Task ImportProfileAsync()
+    {
+        _importBtn.Enabled = false;
+        try
+        {
+            await RunElevatedAsync("import-profile", waitMs: 15 * 60 * 1000);
+        }
+        finally
+        {
+            _importBtn.Enabled = true;
+            await RefreshStatusAsync();
         }
     }
 
@@ -939,5 +1037,209 @@ public sealed class MainForm : Form
                 Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_cfg.LogDir}\"") { UseShellExecute = true });
         }
         catch { }
+    }
+}
+
+// ======================================================================
+//  Диалог импорта профиля
+// ======================================================================
+
+internal sealed class ProfileDialog : Form
+{
+    private readonly TextBox _box = new();
+
+    public string ProfileText => _box.Text.Trim();
+
+    public ProfileDialog()
+    {
+        Text = "Импорт профиля прокси";
+        ClientSize = new Size(620, 400);
+        MinimumSize = new Size(480, 320);
+        StartPosition = FormStartPosition.CenterParent;
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Font = Theme.Body;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        MaximizeBox = false;
+
+        var hint = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 64,
+            ForeColor = Theme.Muted,
+            Font = Theme.Small,
+            Padding = new Padding(14, 10, 14, 0),
+            Text = "Вставьте ссылку vless:// · vmess:// · trojan:// · ss:// · hysteria2://, " +
+                   "конфиг Xray (JSON) или outbound sing-box. Через прокси пойдёт только Claude Desktop, " +
+                   "остальной компьютер — напрямую. Для применения нужны права администратора."
+        };
+
+        _box.Multiline = true;
+        _box.ScrollBars = ScrollBars.Vertical;
+        _box.AcceptsReturn = true;
+        _box.WordWrap = true;
+        _box.Dock = DockStyle.Fill;
+        _box.BackColor = Theme.Card;
+        _box.ForeColor = Theme.Text;
+        _box.BorderStyle = BorderStyle.FixedSingle;
+        _box.Font = Theme.Mono;
+        var boxHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 6, 14, 6), BackColor = Theme.Bg };
+        boxHost.Controls.Add(_box);
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 52,
+            FlowDirection = FlowDirection.RightToLeft,
+            Padding = new Padding(10, 8, 10, 8),
+            BackColor = Theme.Bg
+        };
+        var ok = MakeButton("Применить", Theme.Green, Theme.Bg);
+        ok.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(_box.Text)) return;
+            DialogResult = DialogResult.OK;
+        };
+        var cancel = MakeButton("Отмена", Theme.Ghost, Theme.Text);
+        cancel.DialogResult = DialogResult.Cancel;
+        var paste = MakeButton("Из буфера", Theme.Ghost, Theme.Blue);
+        paste.Click += (_, _) =>
+        {
+            try { if (Clipboard.ContainsText()) _box.Text = Clipboard.GetText(); } catch { }
+        };
+        buttons.Controls.Add(ok);
+        buttons.Controls.Add(cancel);
+        buttons.Controls.Add(paste);
+
+        Controls.Add(boxHost);
+        Controls.Add(buttons);
+        Controls.Add(hint);
+        AcceptButton = null; // Enter inserts a newline in the text box
+        CancelButton = cancel;
+    }
+
+    private static Button MakeButton(string text, Color fill, Color fore)
+    {
+        var b = new Button
+        {
+            Text = text,
+            Width = 130,
+            Height = 34,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = fill,
+            ForeColor = fore,
+            Font = Theme.Semi,
+            UseVisualStyleBackColor = false,
+            Cursor = Cursors.Hand,
+            Margin = new Padding(6, 0, 0, 0)
+        };
+        b.FlatAppearance.BorderColor = Theme.Border;
+        return b;
+    }
+}
+
+// ======================================================================
+//  Мини-гайд: Claude Guard вместе с Happ / другим VPN
+// ======================================================================
+
+internal sealed class GuideDialog : Form
+{
+    public GuideDialog(SystemProxyState proxy)
+    {
+        Text = "Гайд: Claude Guard вместе с другим VPN";
+        ClientSize = new Size(640, 560);
+        MinimumSize = new Size(520, 420);
+        StartPosition = FormStartPosition.CenterParent;
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Font = Theme.Body;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ShowInTaskbar = false;
+        MinimizeBox = false;
+        MaximizeBox = false;
+
+        string current;
+        if (!proxy.Enabled && string.IsNullOrWhiteSpace(proxy.AutoConfigUrl))
+            current = "Сейчас: системный прокси выключен — конфликтов нет.";
+        else if (!string.IsNullOrWhiteSpace(proxy.AutoConfigUrl))
+            current = "Сейчас: ВКЛЮЧЁН PAC-скрипт (" + proxy.AutoConfigUrl + ") — выключите его в VPN-клиенте (см. шаг 2).";
+        else
+            current = "Сейчас: системный прокси включён (" + proxy.Server + "), исключения для Claude " +
+                      (proxy.BypassOk ? "на месте ✓" : "будут добавлены автоматически через несколько секунд");
+
+        var text =
+            "Claude Guard ведёт через свой прокси только Claude Desktop. Другой VPN (Happ, v2rayN, Hiddify, Clash) " +
+            "может работать одновременно для остальных программ — но только в правильном режиме.\r\n\r\n" +
+            "1. Режим Happ: «Системный прокси» (Proxy / System proxy).\r\n" +
+            "   TUN-режим (VPN-режим, «весь трафик») ВЫКЛЮЧИТЬ. Два TUN с автомаршрутизацией мешают друг другу: " +
+            "Claude Guard увидит, что маршрут ушёл в чужой адаптер, и заблокирует Claude " +
+            "(причина ROUTE_NOT_VIA_TUN).\r\n\r\n" +
+            "2. PAC-режим («автоматическая настройка прокси») тоже выключить — используйте обычный системный прокси.\r\n\r\n" +
+            "3. Исключения. Claude Guard сам добавляет домены Claude в исключения системного прокси " +
+            "(anthropic.com, claude.ai, claude.com, claudeusercontent.com) и возвращает их, если Happ их сотрёт. " +
+            "Благодаря этому Claude не уходит в прокси Happ, а идёт через Claude Guard.\r\n\r\n" +
+            "4. Если в Happ есть свой список «прямых» доменов (Direct / Bypass) — добавьте туда эти же домены. " +
+            "Не обязательно, но надёжнее.\r\n\r\n" +
+            "5. Проверка: значок Claude Guard зелёный, Claude работает. Браузер при этом ходит через Happ, как раньше.\r\n\r\n" +
+            "Если Claude Guard заблокировал Claude после включения Happ — откройте окно и посмотрите «Причину». " +
+            "Почти всегда это включённый TUN-режим в Happ.\r\n\r\n" +
+            "Без другого VPN ничего настраивать не нужно.";
+
+        var status = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 52,
+            Padding = new Padding(14, 12, 14, 0),
+            Font = Theme.Semi,
+            ForeColor = proxy.Enabled && !proxy.BypassOk || !string.IsNullOrWhiteSpace(proxy.AutoConfigUrl) ? Theme.Amber : Theme.Green,
+            Text = current
+        };
+        var body = new TextBox
+        {
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            Dock = DockStyle.Fill,
+            BackColor = Theme.Card,
+            ForeColor = Theme.Text,
+            BorderStyle = BorderStyle.None,
+            Font = Theme.Body,
+            Text = text,
+            TabStop = false
+        };
+        var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(14, 6, 14, 6), BackColor = Theme.Bg };
+        host.Controls.Add(body);
+
+        var close = new Button
+        {
+            Text = "Понятно",
+            Width = 130,
+            Height = 34,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Theme.Green,
+            ForeColor = Theme.Bg,
+            Font = Theme.Semi,
+            UseVisualStyleBackColor = false,
+            DialogResult = DialogResult.OK
+        };
+        close.FlatAppearance.BorderColor = Theme.Border;
+        var bar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 52,
+            FlowDirection = FlowDirection.RightToLeft,
+            Padding = new Padding(10, 8, 10, 8),
+            BackColor = Theme.Bg
+        };
+        bar.Controls.Add(close);
+
+        Controls.Add(host);
+        Controls.Add(bar);
+        Controls.Add(status);
+        AcceptButton = close;
+        CancelButton = close;
+        Shown += (_, _) => body.Select(0, 0);
     }
 }

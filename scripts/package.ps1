@@ -26,7 +26,9 @@ foreach ($p in @(@('Service', 'service'), @('Ui', 'ui'))) {
     if ($LASTEXITCODE -ne 0) { throw "publish $($p[0]) failed ($LASTEXITCODE)" }
 }
 
-foreach ($f in 'install.ps1', 'install.cmd', 'uninstall.ps1', 'uninstall.cmd') {
+& (Join-Path $PSScriptRoot 'singbox.ps1') -Destination (Join-Path $stage 'dist\service')
+
+foreach ($f in 'install.ps1', 'install.cmd', 'uninstall.ps1', 'uninstall.cmd', 'singbox.ps1') {
     Copy-Item (Join-Path $root "scripts\$f") (Join-Path $stage "scripts\$f")
 }
 foreach ($f in 'README.md', 'LICENSE') {
