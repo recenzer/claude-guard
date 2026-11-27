@@ -97,6 +97,9 @@ public sealed class GuardEngine : IDisposable
     private string _firewallDetail = "";
     private string _lastReasonLogged = "";
     private bool _claudeRunning;
+    // probe thread reads these: no probes while Claude is closed (no proxy traffic)
+    private volatile bool _probeIdle;
+    private volatile bool _forceFullProbe = true;
     private int[] _claudePids = Array.Empty<int>();
 
     private IPAddress _cachedProbeIp;
@@ -160,7 +163,11 @@ public sealed class GuardEngine : IDisposable
         Log.Warn("PROTECTION_RESUMED", $"Защита включена ({by}). Требуется проверка прокси.");
     });
 
-    public void CheckNow() => _probeNow.Set();
+    public void CheckNow()
+    {
+        _forceFullProbe = true;
+        _probeNow.Set();
+    }
 
     public void RequestRestartClaude() => _commands.Enqueue(() => _restartPending = true);
 
@@ -374,10 +381,14 @@ public sealed class GuardEngine : IDisposable
             var pr = Volatile.Read(ref _probe);
             var gen = _singBoxGeneration;
             var maxAgeMs = _cfg.ProbeIntervalMs + _cfg.ProbeTimeoutMs + 3000;
+            var idle = _probeIdle;
+            var waiting = Environment.TickCount64 - _waitProbeSince < maxAgeMs;
             if (pr == null || pr.Generation != gen)
             {
-                // no result for the current sing-box yet: wait, but not forever
-                if (Environment.TickCount64 - _waitProbeSince < maxAgeMs) pending = true;
+                // no result for the current sing-box yet: wait, but not forever.
+                // While Claude is closed nobody probes, and a missing result is not a failure.
+                if (waiting) pending = true;
+                else if (idle) { /* no data, keep the current state */ }
                 else
                 {
                     failCode = ReasonCodes.ProbeTimeout;
@@ -388,7 +399,13 @@ public sealed class GuardEngine : IDisposable
             else
             {
                 newProbeResult = pr.Ticks != _lastCountedProbeTicks;
-                if (Environment.TickCount64 - pr.Ticks > maxAgeMs)
+                var stale = Environment.TickCount64 - pr.Ticks > maxAgeMs;
+                if (stale && (idle || waiting) && !newProbeResult)
+                {
+                    // Claude closed (probing paused) or just started (fresh probe on its way)
+                    if (waiting) pending = true;
+                }
+                else if (stale)
                 {
                     failCode = ReasonCodes.ProbeTimeout;
                     failText = "Нет свежего результата проверки прокси";
@@ -449,7 +466,9 @@ public sealed class GuardEngine : IDisposable
             if (_state != GuardState.Allowed)
             {
                 var stable = (DateTimeOffset.Now - _healthySince.Value).TotalSeconds;
-                if (_successStreak >= _cfg.SuccessStreakToAllow && stable >= _cfg.StableSecondsToAllow)
+                // while Claude is closed only the forced probe runs: one success is enough
+                var needed = _probeIdle ? 1 : _cfg.SuccessStreakToAllow;
+                if (_successStreak >= needed && stable >= _cfg.StableSecondsToAllow)
                     EnterAllowed();
             }
         }
@@ -539,6 +558,7 @@ public sealed class GuardEngine : IDisposable
             {
                 Volatile.Write(ref _endpoint, new ProbeEndpoint(_singBoxGeneration, port, user, pass));
                 Log.Info("SINGBOX_RESTART", $"sing-box запущен ({why})");
+                _forceFullProbe = true; // verify the new instance even if Claude is closed
                 _probeNow.Set();
             }
             else
@@ -586,7 +606,24 @@ public sealed class GuardEngine : IDisposable
         if (!force && (DateTimeOffset.Now - _lastProcScan).TotalMilliseconds < 1000) return;
         _lastProcScan = DateTimeOffset.Now;
         _claudePids = _installDirs.SelectMany(ClaudeApp.GetRunningPids).Distinct().ToArray();
+        var wasRunning = _claudeRunning;
         _claudeRunning = _claudePids.Length > 0;
+        _probeIdle = _cfg.ProbeOnlyWhileClaudeRuns && !_claudeRunning;
+
+        if (_claudeRunning && !wasRunning && !_paused && _cfg.ProbeOnlyWhileClaudeRuns)
+        {
+            // probing was paused while Claude was closed: verify right now
+            _waitProbeSince = Environment.TickCount64;
+            _forceFullProbe = true;
+            _probeNow.Set();
+            // a soft failure seen before the pause is outdated: re-check instead of killing Claude
+            if (_state == GuardState.Blocked && IsSoftProbeFailure(_reasonCode))
+            {
+                _lastKillAttempt = DateTimeOffset.Now;
+                ResetHealth();
+                SetState(GuardState.Checking, ReasonCodes.Checking, "Claude запущен — проверка прокси", forceLog: true);
+            }
+        }
 
         // Claude updated (new versioned package folder): its new executables have no
         // physical-interface block yet — rescan right away instead of waiting for the timer.
@@ -704,7 +741,8 @@ public sealed class GuardEngine : IDisposable
             SingBoxPid = _singBox.Pid,
             Updated = DateTimeOffset.Now,
             Version = ProgramInfo.Version,
-            PausedUntilRestart = _paused ? "protection paused" : ""
+            PausedUntilRestart = _paused ? "protection paused" : "",
+            ProbeIdle = _probeIdle
         };
         lock (_statusLock) _published = st;
     }
@@ -870,28 +908,52 @@ public sealed class GuardEngine : IDisposable
 
     private void ProbeLoop()
     {
+        int lastTlsGen = -1;
+        long lastTlsTicks = 0;
         while (!_stop)
         {
             try
             {
                 var endpoint = Volatile.Read(ref _endpoint);
-                if (!_paused && endpoint != null && _singBox.IsRunning)
+                var forced = _forceFullProbe;
+                if (!_paused && endpoint != null && _singBox.IsRunning && (!_probeIdle || forced))
                 {
                     var gen = endpoint.Generation;
                     var ep = new IPEndPoint(IPAddress.Loopback, endpoint.Port);
-                    var tasks = _cfg.ProbeTargets
-                        .Select(t => Task.Run(() => TunnelProbe.RunViaSocks(ep, endpoint.User, endpoint.Pass, t, _cfg.ProbeTimeoutMs)))
-                        .ToArray();
-                    try { Task.WaitAll(tasks, _cfg.ProbeTimeoutMs + 1500); } catch { }
+
+                    // Full TLS to probeTargets (~5 KB per target) only when it matters; otherwise a
+                    // ~1 KB HTTP 204 request, second URL only if the first failed.
+                    var full = forced || gen != lastTlsGen || _cfg.ProbeUrls.Length == 0
+                               || _cfg.FullTlsCheckMinutes == 0
+                               || Environment.TickCount64 - lastTlsTicks > _cfg.FullTlsCheckMinutes * 60_000L;
+                    _forceFullProbe = false;
 
                     ProbeResult best = null;
-                    foreach (var t in tasks)
+                    if (full)
                     {
-                        if (!t.IsCompletedSuccessfully) continue;
-                        var r = t.Result;
-                        if (r.Ok) { best = r; break; }
-                        best ??= r;
+                        var tasks = _cfg.ProbeTargets
+                            .Select(t => Task.Run(() => TunnelProbe.RunViaSocks(ep, endpoint.User, endpoint.Pass, t, _cfg.ProbeTimeoutMs)))
+                            .ToArray();
+                        try { Task.WaitAll(tasks, _cfg.ProbeTimeoutMs + 1500); } catch { }
+                        foreach (var t in tasks)
+                        {
+                            if (!t.IsCompletedSuccessfully) continue;
+                            var r = t.Result;
+                            if (r.Ok) { best = r; break; }
+                            best ??= r;
+                        }
+                        if (best?.Ok == true) { lastTlsGen = gen; lastTlsTicks = Environment.TickCount64; }
                     }
+                    else
+                    {
+                        foreach (var u in _cfg.ProbeUrls)
+                        {
+                            var r = TunnelProbe.RunHttpViaSocks(ep, endpoint.User, endpoint.Pass, new Uri(u), _cfg.ProbeTimeoutMs);
+                            if (r.Ok) { best = r; break; }
+                            best ??= r;
+                        }
+                    }
+
                     var snap = new ProbeSnapshot
                     {
                         Ok = best?.Ok ?? false,

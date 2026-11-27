@@ -47,6 +47,19 @@ public sealed class Config
         new() { Host = "www.cloudflare.com", Port = 443 }
     };
 
+    /// <summary>Light health check: plain HTTP "204" endpoints through the proxy (~1 KB each).
+    /// The second URL is tried only if the first fails.</summary>
+    public string[] ProbeUrls { get; set; } =
+    {
+        "http://cp.cloudflare.com/generate_204",
+        "http://www.gstatic.com/generate_204"
+    };
+    /// <summary>Full TLS check of probeTargets (~5 KB): after every sing-box start, on "Check now"
+    /// and then every N minutes. 0 = TLS on every probe (old behaviour, more traffic).</summary>
+    public int FullTlsCheckMinutes { get; set; } = 30;
+    /// <summary>Probe only while Claude Desktop is running: no proxy traffic while it is closed.</summary>
+    public bool ProbeOnlyWhileClaudeRuns { get; set; } = true;
+
     public int ProbeIntervalMs { get; set; } = 2000;
     public int ProbeTimeoutMs { get; set; } = 6000;
     /// <summary>Consecutive failed probe results (not engine ticks) before BLOCK_ALL and killing Claude.</summary>
@@ -132,6 +145,10 @@ public sealed class Config
         ProbeTargets = (ProbeTargets ?? Array.Empty<ProbeTarget>())
             .Where(t => t != null && !string.IsNullOrWhiteSpace(t.Host) && t.Port is > 0 and <= 65535)
             .ToArray();
+        ProbeUrls = (ProbeUrls ?? Array.Empty<string>())
+            .Where(u => Uri.TryCreate(u, UriKind.Absolute, out var x) && x.Scheme == Uri.UriSchemeHttp)
+            .ToArray();
+        if (FullTlsCheckMinutes < 0) FullTlsCheckMinutes = 0;
         if (ProbeTargets.Length == 0)
             ProbeTargets = new[] { new ProbeTarget { Host = "api.anthropic.com", Port = 443 } };
         if (string.IsNullOrWhiteSpace(DataDir)) DataDir = @"C:\ProgramData\ClaudeGuard";

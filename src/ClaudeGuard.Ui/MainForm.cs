@@ -860,7 +860,9 @@ public sealed class MainForm : Form
         {
             case GuardState.Allowed:
                 c = Theme.Green; title = "Защищено"; glyph = "✓";
-                sub = "Claude работает только через прокси, остальной ПК — напрямую";
+                sub = s.ProbeIdle
+                    ? "Claude закрыт — проверка прокси на паузе, чтобы не тратить трафик"
+                    : "Claude работает только через прокси, остальной ПК — напрямую";
                 break;
             case GuardState.Blocked when !s.HasProfile:
                 c = Theme.Amber; title = "Нужен профиль прокси"; glyph = "!";
@@ -937,7 +939,8 @@ public sealed class MainForm : Form
         var pids = s.ClaudePids != null && s.ClaudePids.Length > 0
             ? $"Claude PID: {string.Join(",", s.ClaudePids.Take(3))}"
             : "Claude не запущен";
-        _reasonCode.Text = $"{s.ReasonCode} · с {s.Since.ToLocalTime():HH:mm:ss} ({Ago(s.Since)}) · проба {s.LastProbeMs} мс · {pids}";
+        var probe = s.ProbeIdle ? "проверка на паузе" : $"проба {s.LastProbeMs} мс";
+        _reasonCode.Text = $"{s.ReasonCode} · с {s.Since.ToLocalTime():HH:mm:ss} ({Ago(s.Since)}) · {probe} · {pids}";
 
         // Кнопки
         bool paused = s.Protection == ProtectionState.Disabled;
